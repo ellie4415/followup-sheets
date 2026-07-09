@@ -157,7 +157,7 @@ def _store_tab(shop_name: str) -> str:
 
 
 def _line_items(lines: list) -> list:
-    """[(name, qty, category_id), ...] for every real line on the sale."""
+    """[(name, qty, category_id, subtotal), ...] for every real line on the sale."""
     out = []
     for sl in lines:
         item = sl.get("Item") if isinstance(sl.get("Item"), dict) else {}
@@ -171,15 +171,20 @@ def _line_items(lines: list) -> list:
         except (ValueError, TypeError):
             qty = 1
         cat_id = str(item.get("categoryID") or sl.get("categoryID") or "")
-        out.append((name, qty, cat_id))
+        try:
+            subtotal = float(sl.get("calcSubtotal") or sl.get("displayableSubtotal") or 0)
+        except (ValueError, TypeError):
+            subtotal = 0.0
+        out.append((name, qty, cat_id, subtotal))
     return out
 
 
 def _purchased_text(items: list) -> str:
+    # One line item per line — multiline cell in Sheets.
     parts = []
-    for name, qty, _ in items:
+    for name, qty, _, _ in items:
         parts.append(f"{name} ×{qty}" if qty > 1 else name)
-    return ", ".join(parts)
+    return "\n".join(parts)
 
 
 async def run_job(trigger: str) -> dict:
@@ -208,10 +213,14 @@ async def run_job(trigger: str) -> dict:
         threshold = settings["threshold"]
 
         categories = await client.get_categories()
-        qual_ids   = ls.qualifying_category_ids(categories, settings["categories"])
-        if settings["categories"] and not qual_ids:
-            log.warning(f"No Lightspeed categories matched {settings['categories']} — "
-                        "only the dollar threshold will qualify sales this run")
+        qual_ids   = ls.category_ids_under(categories, settings["categories"])
+        excl_ids   = ls.category_ids_under(categories, settings["excluded"])
+        for kind, roots in (("qualifying", settings["categories"]),
+                            ("excluded", settings["excluded"])):
+            for miss in ls.unmatched_roots(categories, roots):
+                summary.setdefault("warnings", []).append(
+                    f"{kind.capitalize()} category {miss!r} matches nothing in "
+                    "Lightspeed — check the spelling on the Settings tab")
         shops     = await client.get_shops()
         employees = await client.get_employees()
 
@@ -262,8 +271,14 @@ async def run_job(trigger: str) -> dict:
             lines = await client.get_sale_lines(str(sale_id))
             items = _line_items(lines)
 
-            camera_hit = any(qty > 0 and cat_id in qual_ids for _, qty, cat_id in items)
-            over_threshold = threshold > 0 and total >= threshold
+            camera_hit = any(qty > 0 and cat_id in qual_ids and cat_id not in excl_ids
+                             for _, qty, cat_id, _ in items)
+            # Threshold counts qualifying merchandise only: pre-tax, excluded
+            # categories (repairs, lab work) don't count. Negative lines
+            # (returns on an exchange) net against it.
+            qualifying_total = sum(sub for _, _, cat_id, sub in items
+                                   if cat_id not in excl_ids)
+            over_threshold = threshold > 0 and qualifying_total >= threshold
             if not (camera_hit or over_threshold):
                 skip("not a qualifying purchase")
                 continue

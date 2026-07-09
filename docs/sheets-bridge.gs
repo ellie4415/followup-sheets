@@ -19,11 +19,12 @@ const HEADERS = ['Date', 'Customer', 'Phone', 'Email', 'Purchased', 'Sale Total'
 const STORE_TABS = ['Reno', 'Rocklin'];
 const SETTINGS_TAB = 'Settings';
 const SETTINGS_DEFAULTS = [
-  ['Dollar threshold — any sale at/over this total qualifies (blank or 0 = off)', '300'],
+  ['Dollar threshold — qualifying items (pre-tax, excluded categories don\'t count) at/over this qualifies (blank or 0 = off)', '300'],
   ['Qualifying categories — Lightspeed category names, comma-separated (items anywhere under these count)', 'Cameras, Lenses'],
   ['Skip shops — sales from these Lightspeed shops are ignored, comma-separated', 'Action Camera Online'],
+  ['Excluded categories — never count toward qualifying; still listed on qualifying rows', 'Repairs, Lab, Lab / Developing & Printing'],
   ['', ''],
-  ['The app re-reads this tab on every run. Edit values in column B only.', ''],
+  ['The app re-reads this tab on every run. Edit values in column B only. Category names must match Lightspeed exactly — typos show as a warning on the app page.', ''],
 ];
 const SALE_ID_COL = 10; // column J
 
@@ -35,7 +36,7 @@ function doGet(e) {
   const ss = SpreadsheetApp.getActive();
 
   const settingsRaw = ss.getSheetByName(SETTINGS_TAB)
-    .getRange('B1:B3').getValues().map(function (r) { return String(r[0] || ''); });
+    .getRange('B1:B4').getValues().map(function (r) { return String(r[0] || ''); });
 
   const existing = {};
   STORE_TABS.forEach(function (tab) {
@@ -88,6 +89,12 @@ function ensureSetup_() {
     const sh = ss.insertSheet(SETTINGS_TAB);
     sh.getRange(1, 1, SETTINGS_DEFAULTS.length, 2).setValues(SETTINGS_DEFAULTS);
     sh.setColumnWidth(1, 620);
+  } else {
+    // Sheets set up before the excluded-categories feature: add row 4 once.
+    const sh = ss.getSheetByName(SETTINGS_TAB);
+    if (!String(sh.getRange('A4').getValue() || '')) {
+      sh.getRange(4, 1, 1, 2).setValues([SETTINGS_DEFAULTS[3]]);
+    }
   }
 }
 

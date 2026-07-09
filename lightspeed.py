@@ -233,11 +233,26 @@ class LightspeedClient:
 
 # ── Category qualification ────────────────────────────────────────────────────
 
-def qualifying_category_ids(categories: list, root_names: list) -> set:
+def _root_name_variants(root_names: list) -> set:
+    """Lowercased root names, plus the last '/'-segment of slashed names —
+    Lightspeed categories are sometimes referred to as 'Lab / Developing &
+    Printing' while the actual node is named 'Developing & Printing'."""
+    roots = set()
+    for r in root_names:
+        r = (r or "").strip().lower()
+        if not r:
+            continue
+        roots.add(r)
+        if "/" in r:
+            roots.add(r.split("/")[-1].strip())
+    return roots
+
+
+def category_ids_under(categories: list, root_names: list) -> set:
     """IDs of every category that IS one of the named roots or sits anywhere
     under one in the category tree (walks parentID chains — no reliance on
     fullPathName formatting)."""
-    roots = {r.strip().lower() for r in root_names if r and r.strip()}
+    roots = _root_name_variants(root_names)
     if not roots:
         return set()
     by_id = {str(c.get("categoryID", "")): c for c in categories}
@@ -253,6 +268,18 @@ def qualifying_category_ids(categories: list, root_names: list) -> set:
                 break
             node = parent
     return ids
+
+
+def unmatched_roots(categories: list, root_names: list) -> list:
+    """Configured root names that match NO category — surfaced as a run
+    warning so a typo in the Settings tab doesn't silently change behavior."""
+    all_names = {(c.get("name") or "").strip().lower() for c in categories}
+    missing = []
+    for r in root_names:
+        variants = _root_name_variants([r])
+        if variants and not (variants & all_names):
+            missing.append(r)
+    return missing
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────

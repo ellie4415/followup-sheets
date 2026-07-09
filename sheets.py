@@ -33,12 +33,14 @@ STORE_TABS = ["Reno", "Rocklin"]
 
 SETTINGS_TAB      = "Settings"
 SETTINGS_DEFAULTS = [
-    ["Dollar threshold — any sale at/over this total qualifies (blank or 0 = off)", "300"],
+    ["Dollar threshold — qualifying items (pre-tax, excluded categories don't count) at/over this qualifies (blank or 0 = off)", "300"],
     ["Qualifying categories — Lightspeed category names, comma-separated (items anywhere under these count)", "Cameras, Lenses"],
     ["Skip shops — sales from these Lightspeed shops are ignored, comma-separated", "Action Camera Online"],
+    ["Excluded categories — never count toward qualifying; still listed on qualifying rows", "Repairs, Lab, Lab / Developing & Printing"],
     ["", ""],
-    ["The app re-reads this tab on every run. Edit values in column B only.", ""],
+    ["The app re-reads this tab on every run. Edit values in column B only. Category names must match Lightspeed exactly — typos show as a warning on the app page.", ""],
 ]
+EXCLUDED_DEFAULT = SETTINGS_DEFAULTS[3][1]
 
 
 class SheetsError(Exception):
@@ -46,7 +48,7 @@ class SheetsError(Exception):
 
 
 def parse_settings(b_cells: list) -> dict:
-    """B1..B3 of the Settings tab → {threshold, categories, skip_shops}."""
+    """B1..B4 of the Settings tab → {threshold, categories, skip_shops, excluded}."""
     def cell(i: int) -> str:
         return str(b_cells[i]).strip() if i < len(b_cells) and b_cells[i] is not None else ""
 
@@ -59,7 +61,12 @@ def parse_settings(b_cells: list) -> dict:
 
     categories = [c.strip() for c in cell(1).split(",") if c.strip()]
     skip_shops = {s.strip().lower() for s in cell(2).split(",") if s.strip()}
-    return {"threshold": threshold, "categories": categories, "skip_shops": skip_shops}
+    # Row 4 may not exist on sheets set up before the exclusion feature —
+    # fall back to the shipped default rather than silently excluding nothing.
+    excluded_raw = cell(3) if len(b_cells) >= 4 else EXCLUDED_DEFAULT
+    excluded = [c.strip() for c in excluded_raw.split(",") if c.strip()]
+    return {"threshold": threshold, "categories": categories,
+            "skip_shops": skip_shops, "excluded": excluded}
 
 
 class BridgeSheets:
@@ -180,9 +187,13 @@ class Sheets:
     # ── Settings ──────────────────────────────────────────────────────────────
 
     async def read_settings(self) -> dict:
-        data = await self._request("GET", f"{BASE}/{self.sid}/values/{SETTINGS_TAB}!B1:B3")
+        # A-column included so a present-but-blank B4 (exclusions deliberately
+        # cleared) is distinguishable from a sheet that predates row 4 — the
+        # API trims trailing empty cells.
+        data = await self._request("GET", f"{BASE}/{self.sid}/values/{SETTINGS_TAB}!A1:B4")
         rows = data.get("values", [])
-        return parse_settings([r[0] if r else "" for r in rows])
+        b_cells = [(r[1] if len(r) > 1 else "") for r in rows]
+        return parse_settings(b_cells)
 
     # ── Rows ──────────────────────────────────────────────────────────────────
 

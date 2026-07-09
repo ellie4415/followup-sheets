@@ -86,6 +86,9 @@
       {% endif %}
     </table>
     {% if last_run and last_run.error %}<div class="err">{{ last_run.error }}</div>{% endif %}
+    {% if last_run and last_run.warnings %}
+      {% for w in last_run.warnings %}<div class="err" style="color:#9a6b00">⚠ {{ w }}</div>{% endfor %}
+    {% endif %}
     {% if last_run and last_run.skipped %}
       <ul>
         {% for reason, n in last_run.skipped.items() %}<li>{{ n }} skipped — {{ reason }}</li>{% endfor %}
