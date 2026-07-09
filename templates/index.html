@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Follow-Up Sheets — Action Camera</title>
+<style>
+  :root { color-scheme: light; }
+  body  { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
+          background: #f4f5f7; color: #1c2430; }
+  .wrap { max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h1    { font-size: 26px; margin: 0 0 4px; }
+  .sub  { color: #5b6674; margin: 0 0 24px; }
+  .card { background: #fff; border: 1px solid #e2e6ec; border-radius: 10px;
+          padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(20,30,50,.04); }
+  .card h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em;
+             color: #5b6674; margin: 0 0 12px; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px;
+          font-size: 13px; font-weight: 600; }
+  .ok   { background: #e3f5e9; color: #1e7a3c; }
+  .bad  { background: #fde8e8; color: #b42323; }
+  .warn { background: #fff4dd; color: #9a6b00; }
+  .btn  { display: inline-block; padding: 9px 16px; border-radius: 8px; border: 0;
+          font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; }
+  .btn-primary { background: #2456d6; color: #fff; }
+  .btn-ghost   { background: #eef1f6; color: #1c2430; }
+  code  { background: #eef1f6; padding: 2px 6px; border-radius: 5px; font-size: 13px;
+          word-break: break-all; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  td    { padding: 5px 0; vertical-align: top; }
+  td:first-child { color: #5b6674; width: 55%; }
+  .err  { color: #b42323; font-size: 14px; margin-top: 8px; }
+  ul    { margin: 6px 0 0; padding-left: 20px; font-size: 14px; color: #5b6674; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Follow-Up Sheets</h1>
+  <p class="sub">Action Camera — qualifying sales from Lightspeed, logged to Google Sheets for customer follow-up emails.</p>
+
+  <div class="card">
+    <h2>Lightspeed connection</h2>
+    {% if connected %}
+      <span class="pill ok">Connected</span>
+      <a class="btn btn-ghost" style="margin-left:10px" href="/auth">Reconnect</a>
+    {% else %}
+      <span class="pill bad">Not connected</span>
+      <a class="btn btn-primary" style="margin-left:10px" href="/auth">Connect Lightspeed</a>
+    {% endif %}
+    <p style="font-size:13px;color:#5b6674;margin:12px 0 0">
+      When registering the API client in Lightspeed, use:<br>
+      Website: <code>{{ app_url }}</code><br>
+      Redirect URI: <code>{{ redirect_uri }}</code>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Configuration</h2>
+    <table>
+      {% for name, present in config.items() %}
+      <tr><td>{{ name }}</td>
+          <td>{% if present %}<span class="pill ok">Set</span>{% else %}<span class="pill bad">Missing</span>{% endif %}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Runs</h2>
+    {% if running %}
+      <span class="pill warn">Run in progress…</span>
+    {% else %}
+      <button class="btn btn-primary" onclick="runNow(this)">Run now</button>
+    {% endif %}
+    <table style="margin-top:14px">
+      <tr><td>Next scheduled run (daily)</td><td>{{ next_run or "—" }}</td></tr>
+      {% if last_run %}
+      <tr><td>Last run</td><td>{{ last_run.started }} ({{ last_run.trigger }})</td></tr>
+      <tr><td>Result</td><td>
+        {% if last_run.ok %}<span class="pill ok">OK</span>{% else %}<span class="pill bad">Failed</span>{% endif %}
+      </td></tr>
+      {% if last_run.ok %}
+      <tr><td>Rows added</td><td>
+        {% for tab, n in last_run.added.items() %}{{ tab }}: {{ n }}{{ ", " if not loop.last }}{% endfor %}
+      </td></tr>
+      {% endif %}
+      {% endif %}
+    </table>
+    {% if last_run and last_run.error %}<div class="err">{{ last_run.error }}</div>{% endif %}
+    {% if last_run and last_run.skipped %}
+      <ul>
+        {% for reason, n in last_run.skipped.items() %}<li>{{ n }} skipped — {{ reason }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+</div>
+<script>
+async function runNow(btn) {
+  btn.disabled = true; btn.textContent = "Starting…";
+  await fetch("/run", { method: "POST" });
+  poll();
+}
+async function poll() {
+  const r = await fetch("/api/status");
+  const s = await r.json();
+  if (s.running) { setTimeout(poll, 3000); }
+  else { location.reload(); }
+}
+{% if running %}poll();{% endif %}
+</script>
+</body>
+</html>
