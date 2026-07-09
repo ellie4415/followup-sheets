@@ -22,7 +22,7 @@ const SETTINGS_DEFAULTS = [
   ['Dollar threshold — qualifying items (pre-tax, excluded categories don\'t count) at/over this qualifies (blank or 0 = off)', '300'],
   ['Qualifying categories — Lightspeed category names, comma-separated (items anywhere under these count)', 'Cameras, Lenses'],
   ['Skip shops — sales from these Lightspeed shops are ignored, comma-separated', 'Action Camera Online'],
-  ['Excluded categories — never count toward qualifying; still listed on qualifying rows', 'Repairs, Lab, Lab / Developing & Printing'],
+  ['Excluded categories — never count toward qualifying; still listed on qualifying rows', 'Service, Lab, Lab / Developing & Printing'],
   ['', ''],
   ['The app re-reads this tab on every run. Edit values in column B only. Category names must match Lightspeed exactly — typos show as a warning on the app page.', ''],
 ];
