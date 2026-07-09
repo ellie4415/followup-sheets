@@ -33,6 +33,8 @@ log = logging.getLogger("followup")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 APP_URL       = os.environ.get("APP_URL", "http://localhost:8000").rstrip("/")
+if APP_URL and "://" not in APP_URL:
+    APP_URL = "https://" + APP_URL   # a scheme-less APP_URL makes the OAuth redirect loop
 CLIENT_ID     = os.environ.get("LIGHTSPEED_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("LIGHTSPEED_CLIENT_SECRET", "")
 SA_JSON       = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
