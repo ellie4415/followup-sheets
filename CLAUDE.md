@@ -57,7 +57,7 @@ under a qualifying category root OR total ≥ threshold).
 |---|---|
 | `main.py` | Routes, OAuth flow, the run job, daily scheduler |
 | `lightspeed.py` | R-Series client (GET-only, paced, 429-aware), category tree logic, contact parsing |
-| `sheets.py` | Service-account Sheets client — ensure tabs, read Settings, dedup read, append |
+| `sheets.py` | Two Sheets backends, same interface: `BridgeSheets` (Apps Script web app in the sheet, shared-secret auth — the deployed route; Google org policy blocked service-account key creation July 2026) and `Sheets` (service-account REST, fallback). Bridge script: `docs/sheets-bridge.gs`; POSTs to Apps Script 302-redirect, so `follow_redirects=True` is required. |
 | `store.py` | SQLite key/value on the Railway volume: `tokens`, `cursor`, `last_run` |
 | `templates/index.html` | Status page: connection, config checklist, Run now, last-run summary |
 

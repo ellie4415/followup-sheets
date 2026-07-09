@@ -37,6 +37,8 @@ CLIENT_ID     = os.environ.get("LIGHTSPEED_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("LIGHTSPEED_CLIENT_SECRET", "")
 SA_JSON       = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SHEET_ID      = os.environ.get("SHEET_ID", "")
+WEBAPP_URL    = os.environ.get("SHEETS_WEBAPP_URL", "")   # Apps Script bridge (preferred)
+SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 RUN_HOUR      = int(os.environ.get("RUN_HOUR", "6"))          # daily run, Pacific
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))     # first run only
 PACIFIC       = ZoneInfo("America/Los_Angeles")
@@ -131,6 +133,18 @@ async def fetch_new_sales(client: ls.LightspeedClient, cursor: int) -> list:
 
 # ── Qualification + row building ──────────────────────────────────────────────
 
+def _sheets_configured() -> bool:
+    return bool(WEBAPP_URL and SHEETS_SECRET) or bool(SA_JSON and SHEET_ID)
+
+
+def _make_sheets():
+    """Apps Script bridge when configured (no Google Cloud needed), else the
+    service-account REST backend."""
+    if WEBAPP_URL and SHEETS_SECRET:
+        return sh.BridgeSheets(WEBAPP_URL, SHEETS_SECRET)
+    return sh.Sheets(SA_JSON, SHEET_ID)
+
+
 def _store_tab(shop_name: str) -> str:
     n = (shop_name or "").lower()
     if "reno" in n:
@@ -182,11 +196,11 @@ async def run_job(trigger: str) -> dict:
         skipped[reason] = skipped.get(reason, 0) + 1
 
     try:
-        if not (CLIENT_ID and SA_JSON and SHEET_ID):
+        if not (CLIENT_ID and _sheets_configured()):
             raise RuntimeError("Missing configuration — check the checklist on the home page")
 
         client = await get_client()
-        sheet  = sh.Sheets(SA_JSON, SHEET_ID)
+        sheet  = _make_sheets()
         await sheet.ensure_setup()
         settings = await sheet.read_settings()
         threshold = settings["threshold"]
@@ -365,8 +379,8 @@ async def home(request: Request):
         "config": {
             "Lightspeed client ID (LIGHTSPEED_CLIENT_ID)":            bool(CLIENT_ID),
             "Lightspeed client secret (LIGHTSPEED_CLIENT_SECRET)":    bool(CLIENT_SECRET),
-            "Google service account (GOOGLE_SERVICE_ACCOUNT_JSON)":   bool(SA_JSON),
-            "Spreadsheet ID (SHEET_ID)":                              bool(SHEET_ID),
+            "Google Sheets connection (SHEETS_WEBAPP_URL + SHEETS_SECRET, "
+            "or service account)":                                    _sheets_configured(),
         },
     })
 

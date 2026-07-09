@@ -1,8 +1,16 @@
-"""Google Sheets writer — service-account auth, append-only.
+"""Google Sheets writers — append-only, two interchangeable backends.
 
 The app ONLY ever appends new rows and writes headers/defaults to brand-new
 tabs. It never edits or deletes existing rows, so staff columns ("Emailed?",
 "Notes") can never be clobbered by the automation.
+
+Backends (same interface: ensure_setup / read_settings / existing_sale_ids /
+append_rows):
+  - BridgeSheets — talks to a Google Apps Script web app bound to the
+    spreadsheet (docs/sheets-bridge.gs), authenticated by a shared secret.
+    Exists because Google's org policies can block service-account key
+    creation entirely; this route needs no Google Cloud project at all.
+  - Sheets — Google Sheets REST API with a service-account key.
 """
 
 import asyncio
@@ -35,6 +43,81 @@ SETTINGS_DEFAULTS = [
 
 class SheetsError(Exception):
     pass
+
+
+def parse_settings(b_cells: list) -> dict:
+    """B1..B3 of the Settings tab → {threshold, categories, skip_shops}."""
+    def cell(i: int) -> str:
+        return str(b_cells[i]).strip() if i < len(b_cells) and b_cells[i] is not None else ""
+
+    raw_threshold = cell(0).replace("$", "").replace(",", "")
+    try:
+        threshold = float(raw_threshold) if raw_threshold else 0.0
+    except ValueError:
+        log.warning(f"Unreadable threshold {cell(0)!r} in Settings — treating as off")
+        threshold = 0.0
+
+    categories = [c.strip() for c in cell(1).split(",") if c.strip()]
+    skip_shops = {s.strip().lower() for s in cell(2).split(",") if s.strip()}
+    return {"threshold": threshold, "categories": categories, "skip_shops": skip_shops}
+
+
+class BridgeSheets:
+    """Backend for the Apps Script web app bound to the spreadsheet
+    (docs/sheets-bridge.gs). One GET fetches settings + existing sale IDs
+    (the script also creates missing tabs/headers); one POST appends rows.
+
+    Apps Script web apps answer POSTs with a 302 to a one-time result URL —
+    follow_redirects is required or every write looks like it failed."""
+
+    def __init__(self, webapp_url: str, secret: str):
+        self.url    = webapp_url
+        self.secret = secret
+        self._state: dict = {}
+
+    async def _get_state(self) -> dict:
+        async with httpx.AsyncClient(follow_redirects=True) as http:
+            r = await http.get(self.url, params={"secret": self.secret}, timeout=60)
+        r.raise_for_status()
+        data = self._parse(r)
+        self._state = data
+        return data
+
+    def _parse(self, r: httpx.Response) -> dict:
+        try:
+            data = r.json()
+        except ValueError:
+            raise SheetsError(
+                "The Sheets bridge did not return JSON — check the web app is "
+                "deployed with access 'Anyone' and the URL ends in /exec."
+            )
+        if data.get("error"):
+            raise SheetsError(f"Sheets bridge error: {data['error']} — "
+                              "check SHEETS_SECRET matches the script's SECRET.")
+        return data
+
+    async def ensure_setup(self) -> None:
+        await self._get_state()   # doGet creates missing tabs/headers itself
+
+    async def read_settings(self) -> dict:
+        return parse_settings(self._state.get("settings_raw", []))
+
+    async def existing_sale_ids(self, tab: str) -> set:
+        return {str(v) for v in (self._state.get("existing", {}).get(tab) or []) if str(v)}
+
+    async def append_rows(self, tab: str, rows: list) -> None:
+        if not rows:
+            return
+        async with httpx.AsyncClient(follow_redirects=True) as http:
+            r = await http.post(
+                self.url,
+                json={"secret": self.secret, "appends": [{"tab": tab, "rows": rows}]},
+                timeout=60,
+            )
+        r.raise_for_status()
+        data = self._parse(r)
+        if not data.get("ok"):
+            raise SheetsError(f"Sheets bridge append failed: {data}")
 
 
 class Sheets:
@@ -99,20 +182,7 @@ class Sheets:
     async def read_settings(self) -> dict:
         data = await self._request("GET", f"{BASE}/{self.sid}/values/{SETTINGS_TAB}!B1:B3")
         rows = data.get("values", [])
-
-        def cell(i: int) -> str:
-            return rows[i][0].strip() if i < len(rows) and rows[i] else ""
-
-        raw_threshold = cell(0).replace("$", "").replace(",", "")
-        try:
-            threshold = float(raw_threshold) if raw_threshold else 0.0
-        except ValueError:
-            log.warning(f"Unreadable threshold {cell(0)!r} in Settings — treating as off")
-            threshold = 0.0
-
-        categories = [c.strip() for c in cell(1).split(",") if c.strip()]
-        skip_shops = {s.strip().lower() for s in cell(2).split(",") if s.strip()}
-        return {"threshold": threshold, "categories": categories, "skip_shops": skip_shops}
+        return parse_settings([r[0] if r else "" for r in rows])
 
     # ── Rows ──────────────────────────────────────────────────────────────────
 
