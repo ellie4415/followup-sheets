@@ -70,6 +70,8 @@
       <span class="pill warn">Run in progress…</span>
     {% else %}
       <button class="btn btn-primary" onclick="runNow(this)">Run now</button>
+      <button class="btn btn-ghost" style="margin-left:8px" onclick="reimport(this)"
+              title="Re-pulls the last 7 days. Rows already on the sheet are skipped, so delete any rows you want regenerated first.">Re-import last 7 days</button>
     {% endif %}
     <table style="margin-top:14px">
       <tr><td>Next scheduled run (daily)</td><td>{{ next_run or "—" }}</td></tr>
@@ -100,6 +102,12 @@
 async function runNow(btn) {
   btn.disabled = true; btn.textContent = "Starting…";
   await fetch("/run", { method: "POST" });
+  poll();
+}
+async function reimport(btn) {
+  if (!confirm("Re-pull the last 7 days of sales?\n\nRows already on the sheet are left alone (no duplicates). If you want rows REGENERATED with new formatting/rules, delete them from the sheet first, then run this.")) return;
+  btn.disabled = true; btn.textContent = "Starting…";
+  await fetch("/reimport", { method: "POST" });
   poll();
 }
 async function poll() {

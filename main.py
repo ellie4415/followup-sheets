@@ -426,6 +426,18 @@ async def trigger_run():
     return {"ok": True}
 
 
+@app.post("/reimport")
+async def trigger_reimport():
+    """Reset the cursor and re-pull the LOOKBACK_DAYS window. Safe to run any
+    time: sale IDs already on the sheet are skipped, so this only fills gaps —
+    to REGENERATE rows (new format/rules), delete them from the sheet first."""
+    if _job_lock.locked():
+        return JSONResponse({"ok": False, "error": "A run is already in progress"}, status_code=409)
+    store.set("cursor", "0")
+    asyncio.create_task(_run_job_guarded("re-import"))
+    return {"ok": True}
+
+
 @app.get("/auth")
 async def auth_start():
     if not CLIENT_ID:
