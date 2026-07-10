@@ -270,6 +270,22 @@ def category_ids_under(categories: list, root_names: list) -> set:
     return ids
 
 
+def category_path(categories: list, cat_id: str) -> str:
+    """'Cameras > DSLR > Used' — for the /debug-sale endpoint."""
+    by_id = {str(c.get("categoryID", "")): c for c in categories}
+    parts: list = []
+    node = by_id.get(str(cat_id))
+    for _ in range(25):
+        if not node:
+            break
+        parts.append((node.get("name") or "?").strip())
+        parent = by_id.get(str(node.get("parentID") or "0"))
+        if not parent or parent is node:
+            break
+        node = parent
+    return " > ".join(reversed(parts)) if parts else "(no category)"
+
+
 def unmatched_roots(categories: list, root_names: list) -> list:
     """Configured root names that match NO category — surfaced as a run
     warning so a typo in the Settings tab doesn't silently change behavior."""

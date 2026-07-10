@@ -497,6 +497,109 @@ async def trigger_reimport():
     return {"ok": True}
 
 
+@app.get("/debug-sale/{number}")
+async def debug_sale(number: str):
+    """Full qualification trace for one sale (ticket number or saleID) —
+    shows exactly why it was or wasn't added."""
+    try:
+        client = await get_client()
+        sheet  = _make_sheets()
+        await sheet.ensure_setup()
+        settings = await sheet.read_settings()
+
+        categories = await client.get_categories()
+        qual_ids   = ls.category_ids_under(categories, settings["categories"])
+        excl_ids   = ls.category_ids_under(categories, settings["excluded"])
+        shops      = await client.get_shops()
+        employees  = await client.get_employees()
+
+        # ticket number first (what staff/the sheet show), then raw saleID
+        sale = None
+        try:
+            data  = await client.get("Sale.json", params={"ticketNumber": number, "limit": 5})
+            found = ls.as_list(data.get("Sale"))
+            if found:
+                sale = found[0]
+        except httpx.HTTPStatusError:
+            pass
+        if sale is None and number.isdigit():
+            try:
+                data = await client.get(f"Sale/{number}.json")
+                s = data.get("Sale")
+                if isinstance(s, dict) and s:
+                    sale = s
+            except httpx.HTTPStatusError:
+                pass
+        if sale is None:
+            return JSONResponse({"error": f"Sale {number!r} not found in Lightspeed"},
+                                status_code=404)
+
+        sale_id = str(sale.get("saleID", ""))
+        lines   = await client.get_sale_lines(sale_id)
+        items   = _line_items(lines)
+
+        try:
+            total = float(sale.get("calcTotal") or 0)
+        except (ValueError, TypeError):
+            total = 0.0
+        threshold = settings["threshold"]
+
+        line_report = []
+        for name, qty, cat_id, sub, emp_id in items:
+            qualifies = qty > 0 and cat_id in qual_ids and cat_id not in excl_ids
+            excluded  = cat_id in excl_ids
+            line_report.append({
+                "item":            name,
+                "qty":             qty,
+                "subtotal":        sub,
+                "category":        ls.category_path(categories, cat_id),
+                "sold_by":         employees.get(emp_id, "(none on line)"),
+                "qualifying_item": qualifies,
+                "excluded":        excluded,
+                "counts_toward_threshold": not excluded,
+            })
+
+        camera_hit = any(l["qualifying_item"] for l in line_report)
+        qualifying_total = sum(l["subtotal"] for l in line_report if not l["excluded"])
+        over_threshold = threshold > 0 and qualifying_total >= threshold
+
+        shop_name = shops.get(str(sale.get("shopID", "")), "")
+        checks = {
+            "completed":            str(sale.get("completed")) == "true",
+            "not_voided":           str(sale.get("voided")) != "true",
+            "shop":                 shop_name,
+            "shop_recognized":      bool(_store_tab(shop_name)),
+            "shop_not_skipped":     shop_name.strip().lower() not in settings["skip_shops"],
+            "sale_total":           total,
+            "total_positive":       total > 0,
+            "has_customer":         str(sale.get("customerID") or "0") not in ("", "0"),
+            "camera_or_lens_item":  camera_hit,
+            "threshold":            threshold,
+            "qualifying_total_pre_tax_non_excluded": round(qualifying_total, 2),
+            "over_threshold":       over_threshold,
+        }
+        would_add = all([
+            checks["completed"], checks["not_voided"], checks["shop_recognized"],
+            checks["shop_not_skipped"], checks["total_positive"], checks["has_customer"],
+            (camera_hit or over_threshold),
+        ])
+        return {
+            "sale_id":      sale_id,
+            "ticket":       str(sale.get("ticketNumber", "")),
+            "would_add":    would_add,
+            "added_because": ("camera/lens item" if camera_hit else
+                              "over threshold" if over_threshold else "—"),
+            "checks":       checks,
+            "lines":        line_report,
+            "note": "customer email is checked at run time and not shown here",
+        }
+    except ls.AuthExpired as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:
+        log.exception("debug-sale failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
 @app.get("/auth")
 async def auth_start():
     if not CLIENT_ID:
