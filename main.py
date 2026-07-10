@@ -58,17 +58,36 @@ _job_running  = False
 
 # ── Lightspeed auth ───────────────────────────────────────────────────────────
 
-async def get_client() -> ls.LightspeedClient:
-    """Refresh the token (serialized) and return a ready client.
+REFRESH_COOLDOWN = 600   # reuse a <10-min-old access token instead of refreshing
 
-    The rotated refresh token is persisted BEFORE the function returns —
-    losing a rotated token kills the whole grant (lab-sync, July 2 2026)."""
+
+async def get_client() -> ls.LightspeedClient:
+    """Return a ready client, refreshing the token only when the current one
+    is older than REFRESH_COOLDOWN. Refreshes are serialized and the rotated
+    refresh token is persisted BEFORE the function returns — losing a rotated
+    token kills the whole grant (lab-sync, July 2 2026). The cooldown also
+    keeps ad-hoc endpoints like /debug-sale from hammering the token endpoint
+    into a 429."""
+    import time as _time
+
     tokens = store.get_json("tokens")
     if not tokens or not tokens.get("refresh_token"):
         raise ls.AuthExpired("Not connected to Lightspeed — visit /auth")
 
+    def _still_fresh(t: dict) -> bool:
+        try:
+            return (t.get("access_token")
+                    and _time.time() - float(t.get("refreshed_at") or 0) < REFRESH_COOLDOWN)
+        except (ValueError, TypeError):
+            return False
+
+    if _still_fresh(tokens):
+        return ls.LightspeedClient(tokens["access_token"], tokens["account_id"])
+
     async with _refresh_lock:
         tokens = store.get_json("tokens")  # re-read: another coroutine may have rotated it
+        if _still_fresh(tokens):
+            return ls.LightspeedClient(tokens["access_token"], tokens["account_id"])
         try:
             fresh = await ls.do_refresh(CLIENT_ID, CLIENT_SECRET, tokens["refresh_token"])
         except httpx.HTTPStatusError as exc:
@@ -76,9 +95,15 @@ async def get_client() -> ls.LightspeedClient:
                 raise ls.AuthExpired(
                     "Lightspeed rejected the refresh token — reconnect via /auth"
                 ) from exc
+            if exc.response.status_code == 429:
+                raise RuntimeError(
+                    "Lightspeed's token endpoint is rate-limiting us — wait a "
+                    "minute and try again (no harm done)"
+                ) from exc
             raise
         tokens["access_token"]  = fresh["access_token"]
         tokens["refresh_token"] = fresh["refresh_token"]
+        tokens["refreshed_at"]  = _time.time()
         store.set_json("tokens", tokens)
 
     return ls.LightspeedClient(tokens["access_token"], tokens["account_id"])
