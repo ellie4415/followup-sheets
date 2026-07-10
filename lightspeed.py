@@ -159,6 +159,8 @@ class LightspeedClient:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 401:
                     raise  # loud — caller decides to refresh or surface AuthExpired
+                if 400 <= exc.response.status_code < 500:
+                    raise  # 4xx (other than 429, handled above) won't improve on retry
                 last_exc = exc
                 await asyncio.sleep(1 + attempt)
             except httpx.HTTPError as exc:
@@ -251,8 +253,21 @@ def _root_name_variants(root_names: list) -> set:
 def category_ids_under(categories: list, root_names: list) -> set:
     """IDs of every category that IS one of the named roots or sits anywhere
     under one in the category tree (walks parentID chains — no reliance on
-    fullPathName formatting)."""
-    roots = _root_name_variants(root_names)
+    fullPathName formatting).
+
+    Slashed names match exactly when possible; the last-segment fallback only
+    kicks in when the exact name matches nothing. Otherwise 'Cameras / Film'
+    would ALSO silently match a separate top-level 'Film' category."""
+    all_names = {(c.get("name") or "").strip().lower() for c in categories}
+    roots = set()
+    for r in root_names:
+        r = (r or "").strip().lower()
+        if not r:
+            continue
+        if r in all_names or "/" not in r:
+            roots.add(r)
+        else:
+            roots.add(r.split("/")[-1].strip())
     if not roots:
         return set()
     by_id = {str(c.get("categoryID", "")): c for c in categories}

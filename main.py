@@ -538,22 +538,35 @@ async def debug_sale(number: str):
         shops      = await client.get_shops()
         employees  = await client.get_employees()
 
-        # ticket number first (what staff/the sheet show), then raw saleID
+        # Ticket number first (what staff/the sheet show) — full tickets are
+        # stored 8 digits ("00096017"), so also try the padded form. This
+        # account can 400 on ticketNumber queries entirely (same family of
+        # quirk as its timestamp filter), so tolerate failures and fall back
+        # to treating the number as a raw saleID.
         sale = None
-        try:
-            data  = await client.get("Sale.json", params={"ticketNumber": number, "limit": 5})
-            found = ls.as_list(data.get("Sale"))
-            if found:
-                sale = found[0]
-        except httpx.HTTPStatusError:
-            pass
+        candidates = [number]
+        if number.isdigit() and len(number) < 8:
+            candidates.append("00" + number.zfill(6))
+        for cand in candidates:
+            try:
+                data  = await client.get("Sale.json", params={"ticketNumber": cand, "limit": 5})
+                found = ls.as_list(data.get("Sale"))
+                if found:
+                    sale = found[0]
+                    break
+            except ls.AuthExpired:
+                raise
+            except Exception:
+                continue
         if sale is None and number.isdigit():
             try:
                 data = await client.get(f"Sale/{number}.json")
                 s = data.get("Sale")
                 if isinstance(s, dict) and s:
                     sale = s
-            except httpx.HTTPStatusError:
+            except ls.AuthExpired:
+                raise
+            except Exception:
                 pass
         if sale is None:
             return JSONResponse({"error": f"Sale {number!r} not found in Lightspeed"},
