@@ -192,10 +192,10 @@ def _purchased_text(items: list) -> str:
 
 
 def _salespeople(items: list, qual_ids: set, excl_ids: set,
-                 employees: dict, sale_emp_id: str) -> str:
-    """Credit the person who sold the qualifying item(s), not whoever rang
-    the sale out. Priority: employees on qualifying camera/lens lines →
-    employees on any counted (non-excluded) line → the sale's employee."""
+                 employees: dict, sale_emp_id: str) -> list:
+    """Names of who sold the qualifying item(s), not whoever rang the sale
+    out. Priority: employees on qualifying camera/lens lines → employees on
+    any counted (non-excluded) line → the sale's employee."""
     def names_for(emp_ids: list) -> list:
         seen: list = []
         for e in emp_ids:
@@ -212,7 +212,15 @@ def _salespeople(items: list, qual_ids: set, excl_ids: set,
                            if c not in excl_ids and e not in ("", "0")])
     if not names:
         names = names_for([sale_emp_id])
-    return ", ".join(names)
+    return names
+
+
+def _employee_tab(name: str) -> str:
+    """Sheet-tab-safe employee name; blank when it can't be a tab."""
+    tab = name.strip()
+    if not tab or tab in sh.STORE_TABS or tab == sh.SETTINGS_TAB:
+        return ""
+    return tab[:80]
 
 
 async def run_job(trigger: str) -> dict:
@@ -327,24 +335,46 @@ async def run_job(trigger: str) -> dict:
             last  = (customer.get("lastName") or "").strip()
             name  = f"{first} {last}".strip() or "(no name)"
 
-            rows_by_tab[tab].append([
+            sellers = _salespeople(items, qual_ids, excl_ids, employees,
+                                   str(sale.get("employeeID", "")))
+            row = [
                 ls.format_date(sale.get("timeStamp", "")),
                 name,
                 ls.customer_phone(customer),
                 ", ".join(emails),
                 _purchased_text(items),
                 f"${total:,.2f}",
-                _salespeople(items, qual_ids, excl_ids, employees,
-                             str(sale.get("employeeID", ""))),
+                ", ".join(sellers),
                 "",   # Emailed? — staff's column
                 "",   # Notes — staff's column
                 str(sale_id),
-            ])
+            ]
+            rows_by_tab[tab].append(row)
             existing[tab].add(str(sale_id))
 
-        for tab in sh.STORE_TABS:
-            await sheet.append_rows(tab, rows_by_tab[tab])
-            summary["added"][tab] = len(rows_by_tab[tab])
+            # A copy on each seller's own tab so staff can work just their
+            # customers. Store tabs remain the master lists.
+            if sheet.supports_dynamic_tabs():
+                for seller in sellers:
+                    emp_tab = _employee_tab(seller)
+                    if not emp_tab:
+                        continue
+                    if emp_tab not in existing:
+                        existing[emp_tab] = await sheet.existing_sale_ids(emp_tab)
+                    if str(sale_id) in existing[emp_tab]:
+                        continue
+                    rows_by_tab.setdefault(emp_tab, []).append(row)
+                    existing[emp_tab].add(str(sale_id))
+            elif sellers:
+                w = ("Employee tabs need the updated bridge script — repaste "
+                     "docs/sheets-bridge.gs into Extensions → Apps Script (keep "
+                     "your secret), then Deploy → Manage deployments → New version")
+                if w not in summary.setdefault("warnings", []):
+                    summary["warnings"].append(w)
+
+        for tab, rows in rows_by_tab.items():
+            await sheet.append_rows(tab, rows)
+            summary["added"][tab] = len(rows)
 
         # Advance the cursor only after every append succeeded — a Sheets
         # failure means the whole batch is retried next run (the sheet-side

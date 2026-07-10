@@ -106,6 +106,11 @@ class BridgeSheets:
     async def ensure_setup(self) -> None:
         await self._get_state()   # doGet creates missing tabs/headers itself
 
+    def supports_dynamic_tabs(self) -> bool:
+        """v2+ scripts auto-create unknown tabs on append; a v1 script would
+        SILENTLY drop rows for tabs it doesn't know."""
+        return int(self._state.get("v") or 1) >= 2
+
     async def read_settings(self) -> dict:
         return parse_settings(self._state.get("settings_raw", []))
 
@@ -162,13 +167,14 @@ class Sheets:
     async def ensure_setup(self) -> None:
         """Create missing tabs and write headers/defaults on NEW tabs only."""
         meta = await self._request("GET", f"{BASE}/{self.sid}?fields=sheets.properties.title")
-        existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
+        self._tabs = {s["properties"]["title"] for s in meta.get("sheets", [])}
 
         wanted  = STORE_TABS + [SETTINGS_TAB]
-        missing = [t for t in wanted if t not in existing]
+        missing = [t for t in wanted if t not in self._tabs]
         if missing:
             body = {"requests": [{"addSheet": {"properties": {"title": t}}} for t in missing]}
             await self._request("POST", f"{BASE}/{self.sid}:batchUpdate", json=body)
+            self._tabs.update(missing)
             log.info(f"Created missing tabs: {missing}")
 
         for tab in STORE_TABS:
@@ -176,6 +182,17 @@ class Sheets:
                 await self._write_range(f"{tab}!A1", [HEADERS])
         if SETTINGS_TAB in missing:
             await self._write_range(f"{SETTINGS_TAB}!A1", SETTINGS_DEFAULTS)
+
+    def supports_dynamic_tabs(self) -> bool:
+        return True
+
+    async def _ensure_tab(self, tab: str) -> None:
+        if tab in getattr(self, "_tabs", set()):
+            return
+        body = {"requests": [{"addSheet": {"properties": {"title": tab}}}]}
+        await self._request("POST", f"{BASE}/{self.sid}:batchUpdate", json=body)
+        await self._write_range(f"{tab}!A1", [HEADERS])
+        self._tabs.add(tab)
 
     async def _write_range(self, a1: str, values: list) -> None:
         await self._request(
@@ -200,12 +217,15 @@ class Sheets:
     async def existing_sale_ids(self, tab: str) -> set:
         """Sale IDs already on the tab (column J) — dedup safety net so a lost
         cursor or re-run can never produce duplicate rows."""
+        if tab not in getattr(self, "_tabs", {tab}):
+            return set()   # tab doesn't exist yet (e.g. new employee)
         data = await self._request("GET", f"{BASE}/{self.sid}/values/{tab}!J2:J")
         return {row[0].strip() for row in data.get("values", []) if row and row[0].strip()}
 
     async def append_rows(self, tab: str, rows: list) -> None:
         if not rows:
             return
+        await self._ensure_tab(tab)
         await self._request(
             "POST",
             f"{BASE}/{self.sid}/values/{tab}!A1:append"

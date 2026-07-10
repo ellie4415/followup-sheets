@@ -38,18 +38,22 @@ function doGet(e) {
   const settingsRaw = ss.getSheetByName(SETTINGS_TAB)
     .getRange('B1:B4').getValues().map(function (r) { return String(r[0] || ''); });
 
+  // Sale IDs from EVERY data tab (store tabs + per-employee tabs) so the
+  // app's dedup covers them all.
   const existing = {};
-  STORE_TABS.forEach(function (tab) {
-    const sh = ss.getSheetByName(tab);
+  ss.getSheets().forEach(function (sh) {
+    const name = sh.getName();
+    if (name === SETTINGS_TAB) return;
     const last = sh.getLastRow();
-    existing[tab] = last >= 2
+    existing[name] = last >= 2
       ? sh.getRange(2, SALE_ID_COL, last - 1, 1).getValues()
           .map(function (r) { return String(r[0] || '').trim(); })
           .filter(String)
       : [];
   });
 
-  return json_({ ok: true, settings_raw: settingsRaw, existing: existing });
+  // v2: employee tabs supported (doPost auto-creates unknown tabs).
+  return json_({ ok: true, v: 2, settings_raw: settingsRaw, existing: existing });
 }
 
 function doPost(e) {
@@ -64,8 +68,14 @@ function doPost(e) {
   lock.waitLock(30000);
   try {
     (body.appends || []).forEach(function (a) {
-      const sh = ss.getSheetByName(a.tab);
-      if (!sh || !a.rows || !a.rows.length) return;
+      if (!a.tab || a.tab === SETTINGS_TAB || !a.rows || !a.rows.length) return;
+      let sh = ss.getSheetByName(a.tab);
+      if (!sh) {   // per-employee tabs are created on first use
+        sh = ss.insertSheet(a.tab);
+        sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
+          .setFontWeight('bold');
+        sh.setFrozenRows(1);
+      }
       sh.getRange(sh.getLastRow() + 1, 1, a.rows.length, a.rows[0].length)
         .setValues(a.rows);
     });
