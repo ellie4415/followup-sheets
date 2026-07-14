@@ -15,7 +15,7 @@
 const SECRET = 'PASTE_SECRET_HERE';
 
 const HEADERS = ['Date', 'Customer', 'Phone', 'Email', 'Purchased', 'Sale Total',
-                 'Salesperson', 'Emailed?', 'Notes', 'Sale ID'];
+                 'Salesperson', 'Emailed?', 'Notes', 'Sale ID', 'Store'];
 const STORE_TABS = ['Reno', 'Rocklin'];
 const SETTINGS_TAB = 'Settings';
 const SETTINGS_DEFAULTS = [
@@ -52,8 +52,8 @@ function doGet(e) {
       : [];
   });
 
-  // v2: employee tabs supported (doPost auto-creates unknown tabs).
-  return json_({ ok: true, v: 2, settings_raw: settingsRaw, existing: existing });
+  // v3: Store column; v2: employee tabs (doPost auto-creates unknown tabs).
+  return json_({ ok: true, v: 3, settings_raw: settingsRaw, existing: existing });
 }
 
 function doPost(e) {
@@ -93,6 +93,14 @@ function ensureSetup_() {
       sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
         .setFontWeight('bold');
       sh.setFrozenRows(1);
+    }
+  });
+  // Backfill header cells added after a tab was created (e.g. K1 "Store").
+  ss.getSheets().forEach(function (sh) {
+    if (sh.getName() === SETTINGS_TAB) return;
+    const last = sh.getRange(1, HEADERS.length);
+    if (!String(last.getValue() || '')) {
+      last.setValue(HEADERS[HEADERS.length - 1]).setFontWeight('bold');
     }
   });
   if (!ss.getSheetByName(SETTINGS_TAB)) {

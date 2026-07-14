@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import secrets
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -288,6 +289,35 @@ async def run_job(trigger: str) -> dict:
         cursor = int(store.get("cursor") or 0)
         sales  = await fetch_new_sales(client, cursor)
 
+        # Re-check sales previously skipped as open register carts. Carts can
+        # complete hours or DAYS after first seen — long after the cursor has
+        # moved past their saleID — so without this watch list they would be
+        # lost forever (lab-sync lesson: completed='false' is a normal
+        # transient state, not a terminal one).
+        now = time.time()
+        batch_ids  = {str(s.get("saleID") or "") for s in sales}
+        prior      = store.get_json("pending_carts", []) or []
+        first_seen = {str(p.get("id")): float(p.get("first_seen") or now) for p in prior}
+        pending_next: list = []
+        for p in prior:
+            pid = str(p.get("id") or "")
+            if not pid or pid in batch_ids:
+                continue
+            if now - first_seen[pid] > 45 * 86400:
+                log.info(f"Dropping open cart {pid} from the watch list (>45 days old)")
+                continue
+            try:
+                data = await client.get(f"Sale/{pid}.json")
+                s = data.get("Sale")
+                if isinstance(s, dict) and s:
+                    sales.append(s)   # re-evaluated below like any new sale
+            except ls.AuthExpired:
+                raise
+            except Exception as exc:
+                log.warning(f"Open-cart re-check {pid} failed, keeping on watch list: {exc}")
+                pending_next.append(p)
+        sales.sort(key=lambda s: int(s.get("saleID") or 0))
+
         existing = {}
         for tab in sh.STORE_TABS:
             existing[tab] = await sheet.existing_sale_ids(tab)
@@ -302,6 +332,8 @@ async def run_job(trigger: str) -> dict:
 
             if str(sale.get("completed")) != "true":
                 skip("not completed (open register cart)")
+                pending_next.append({"id": str(sale_id),
+                                     "first_seen": first_seen.get(str(sale_id), now)})
                 continue
             if str(sale.get("voided")) == "true":
                 skip("voided")
@@ -373,6 +405,7 @@ async def run_job(trigger: str) -> dict:
                 "",   # Emailed? — staff's column
                 "",   # Notes — staff's column
                 str(sale_id),
+                tab,  # Store — matters on employee tabs, which mix stores
             ]
             rows_by_tab[tab].append(row)
             existing[tab].add(str(sale_id))
@@ -406,6 +439,8 @@ async def run_job(trigger: str) -> dict:
         # dedup makes retries harmless).
         if max_id > cursor:
             store.set("cursor", str(max_id))
+        store.set_json("pending_carts", pending_next[-500:])
+        summary["watching_open_carts"] = len(pending_next)
 
         summary["ok"] = True
         log.info(f"Run complete: +{summary['added']} skipped={skipped}")
@@ -520,6 +555,33 @@ async def trigger_reimport():
     store.set("cursor", "0")
     asyncio.create_task(_run_job_guarded("re-import"))
     return {"ok": True}
+
+
+@app.get("/debug-tabs")
+async def debug_tabs():
+    """Row counts + cross-tab consistency: which employee-tab sale IDs are
+    missing from the store (master) tabs, plus the open-cart watch list."""
+    try:
+        sheet = _make_sheets()
+        await sheet.ensure_setup()
+        tabs = await sheet.all_sale_ids()
+        store_ids: set = set()
+        for t in sh.STORE_TABS:
+            store_ids |= tabs.get(t, set())
+        report = {}
+        for tab, ids in sorted(tabs.items()):
+            entry = {"rows": len(ids)}
+            if tab not in sh.STORE_TABS:
+                entry["sale_ids_missing_from_store_tabs"] = sorted(ids - store_ids)
+            report[tab] = entry
+        return {
+            "tabs":               report,
+            "cursor":             store.get("cursor"),
+            "pending_open_carts": store.get_json("pending_carts", []),
+        }
+    except Exception as exc:
+        log.exception("debug-tabs failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
 
 @app.get("/debug-sale/{number}")

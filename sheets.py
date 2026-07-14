@@ -26,8 +26,10 @@ log = logging.getLogger("followup")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 BASE   = "https://sheets.googleapis.com/v4/spreadsheets"
 
+# Sale ID must stay in column J — the bridge script's dedup reads column 10.
+# Store sits after it so employee tabs (which mix stores) show provenance.
 HEADERS = ["Date", "Customer", "Phone", "Email", "Purchased", "Sale Total",
-           "Salesperson", "Emailed?", "Notes", "Sale ID"]
+           "Salesperson", "Emailed?", "Notes", "Sale ID", "Store"]
 
 STORE_TABS = ["Reno", "Rocklin"]
 
@@ -117,6 +119,10 @@ class BridgeSheets:
     async def existing_sale_ids(self, tab: str) -> set:
         return {str(v) for v in (self._state.get("existing", {}).get(tab) or []) if str(v)}
 
+    async def all_sale_ids(self) -> dict:
+        return {tab: {str(v) for v in ids if str(v)}
+                for tab, ids in self._state.get("existing", {}).items()}
+
     async def append_rows(self, tab: str, rows: list) -> None:
         if not rows:
             return
@@ -185,6 +191,13 @@ class Sheets:
 
     def supports_dynamic_tabs(self) -> bool:
         return True
+
+    async def all_sale_ids(self) -> dict:
+        out = {}
+        for tab in getattr(self, "_tabs", set()):
+            if tab != SETTINGS_TAB:
+                out[tab] = await self.existing_sale_ids(tab)
+        return out
 
     async def _ensure_tab(self, tab: str) -> None:
         if tab in getattr(self, "_tabs", set()):

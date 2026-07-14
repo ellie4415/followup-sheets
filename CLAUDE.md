@@ -48,8 +48,16 @@ under a qualifying category root OR total ≥ threshold).
    written only to freshly created tabs.
 6. **Cursor advances only after all appends succeed**; the sheet-side Sale ID
    dedup (column J) makes retries and cursor loss harmless.
-7. Register carts show `completed='false'` until paid — skipping them is
-   normal, not a bug.
+7. Register carts show `completed='false'` until paid — a NORMAL TRANSIENT
+   state, not terminal. Skipped open carts go on the `pending_carts` watch
+   list (SQLite) and every run re-fetches each one individually until it
+   completes (or 45 days pass). Never let the saleID cursor be the only
+   gate: it advances past open carts, and without the watch list any cart
+   completed after a run is lost forever (this bug shipped and ate real
+   sales, July 10–14 2026 — recovered via /reimport).
+8. `/debug-sale/{number}` (full qualification trace) and `/debug-tabs`
+   (per-tab row counts + employee-vs-store consistency + watch list) are
+   the first stop for any "why is/isn't this in the sheet" question.
 
 ## Files
 
