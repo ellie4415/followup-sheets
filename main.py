@@ -405,7 +405,6 @@ async def run_job(trigger: str) -> dict:
                 "",   # Emailed? — staff's column
                 "",   # Notes — staff's column
                 str(sale_id),
-                tab,  # Store — matters on employee tabs, which mix stores
             ]
             rows_by_tab[tab].append(row)
             existing[tab].add(str(sale_id))
@@ -573,6 +572,8 @@ async def debug_tabs():
             entry = {"rows": len(ids)}
             if tab not in sh.STORE_TABS:
                 entry["sale_ids_missing_from_store_tabs"] = sorted(ids - store_ids)
+                for t in sh.STORE_TABS:   # which store tab holds this person's sales
+                    entry[f"on_{t}"] = len(ids & tabs.get(t, set()))
             report[tab] = entry
         return {
             "tabs":               report,

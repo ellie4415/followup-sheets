@@ -27,9 +27,8 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 BASE   = "https://sheets.googleapis.com/v4/spreadsheets"
 
 # Sale ID must stay in column J — the bridge script's dedup reads column 10.
-# Store sits after it so employee tabs (which mix stores) show provenance.
 HEADERS = ["Date", "Customer", "Phone", "Email", "Purchased", "Sale Total",
-           "Salesperson", "Emailed?", "Notes", "Sale ID", "Store"]
+           "Salesperson", "Emailed?", "Notes", "Sale ID"]
 
 STORE_TABS = ["Reno", "Rocklin"]
 

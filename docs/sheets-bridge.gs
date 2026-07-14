@@ -15,7 +15,7 @@
 const SECRET = 'PASTE_SECRET_HERE';
 
 const HEADERS = ['Date', 'Customer', 'Phone', 'Email', 'Purchased', 'Sale Total',
-                 'Salesperson', 'Emailed?', 'Notes', 'Sale ID', 'Store'];
+                 'Salesperson', 'Emailed?', 'Notes', 'Sale ID'];
 const STORE_TABS = ['Reno', 'Rocklin'];
 const SETTINGS_TAB = 'Settings';
 const SETTINGS_DEFAULTS = [
@@ -76,13 +76,30 @@ function doPost(e) {
           .setFontWeight('bold');
         sh.setFrozenRows(1);
       }
-      sh.getRange(sh.getLastRow() + 1, 1, a.rows.length, a.rows[0].length)
+      // Append right after the last row that has a Sale ID — NOT getLastRow(),
+      // which counts pre-filled checkboxes/validation far below the data and
+      // would strand new rows beneath a blank gap.
+      const start = lastDataRow_(sh) + 1;
+      const overflow = start + a.rows.length - 1 - sh.getMaxRows();
+      if (overflow > 0) sh.insertRowsAfter(sh.getMaxRows(), overflow);
+      sh.getRange(start, 1, a.rows.length, a.rows[0].length)
         .setValues(a.rows);
     });
   } finally {
     lock.releaseLock();
   }
   return json_({ ok: true });
+}
+
+function lastDataRow_(sh) {
+  const last = sh.getLastRow();
+  if (last < 2) return 1;
+  const ids = sh.getRange(2, SALE_ID_COL, last - 1, 1).getValues();
+  let lastData = 1;
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || '').trim()) lastData = i + 2;
+  }
+  return lastData;
 }
 
 function ensureSetup_() {
@@ -93,14 +110,6 @@ function ensureSetup_() {
       sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
         .setFontWeight('bold');
       sh.setFrozenRows(1);
-    }
-  });
-  // Backfill header cells added after a tab was created (e.g. K1 "Store").
-  ss.getSheets().forEach(function (sh) {
-    if (sh.getName() === SETTINGS_TAB) return;
-    const last = sh.getRange(1, HEADERS.length);
-    if (!String(last.getValue() || '')) {
-      last.setValue(HEADERS[HEADERS.length - 1]).setFontWeight('bold');
     }
   });
   if (!ss.getSheetByName(SETTINGS_TAB)) {
