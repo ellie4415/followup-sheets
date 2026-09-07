@@ -9,16 +9,16 @@
  * Deploy. Copy the /exec URL into Railway env var MANAGER_WEBAPP_URL, and
  * put the same SECRET value in env var MANAGER_SECRET.
  *
- * Columns: Date | Customer | Cashier | Items (one per line, each tagged with
- * who sold it) | Total Profit | Sale ID. Append-only; the app never edits
- * existing rows.
+ * Columns: Date | Customer | Cashier | Items ("Seller — item" per line) |
+ * Total Profit | Sale Total | Sale ID. Append-only; the app never edits
+ * existing rows (the one-time fixColumns/flipItemLines migrations excepted).
  */
 
 const SECRET = 'PASTE_SECRET_HERE';
 
-const HEADERS = ['Date', 'Customer', 'Cashier (Sale Total)', 'Items', 'Total Profit', 'Sale ID'];
+const HEADERS = ['Date', 'Customer', 'Cashier', 'Items', 'Total Profit', 'Sale Total', 'Sale ID'];
 const STORE_TABS = ['Reno', 'Rocklin'];
-const SALE_ID_COL = 6; // column F
+const SALE_ID_COL = 7; // column G — moved when Sale Total got its own column (fixColumns)
 const CASHIER_COL = 3;
 const ITEMS_COL   = 4;
 
@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 3, existing: existing });
+  return json_({ ok: true, v: 4, existing: existing });
 }
 
 function doPost(e) {
@@ -135,6 +135,43 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
       sh.getRange(rowIdx, CASHIER_COL).setBackground(colorsFor_(nm).bg);
     }
   }
+}
+
+/**
+ * ONE-TIME migration for the Sale Total column: existing rows have
+ * "Name ($total)" in Cashier (col C) and Sale ID in col F. This splits the
+ * total out of the cashier cell into new col F, moves Sale ID to col G,
+ * and rewrites the header row. Run once from the function dropdown.
+ */
+function fixColumns() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('cols_v2')) {
+    throw new Error('fixColumns already ran — the columns are already migrated.');
+  }
+  const ss = SpreadsheetApp.getActive();
+  STORE_TABS.forEach(function (tabName) {
+    const sh = ss.getSheetByName(tabName);
+    if (!sh) return;
+    sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+    const last = sh.getLastRow();
+    for (let r = 2; r <= last; r++) {
+      const saleId = String(sh.getRange(r, 6).getValue() || '');
+      if (!saleId) continue;
+      const cashText = String(sh.getRange(r, CASHIER_COL).getValue() || '');
+      let name = cashText, total = '';
+      const p = cashText.lastIndexOf(' (');
+      if (p > 0 && cashText.charAt(cashText.length - 1) === ')') {
+        name  = cashText.substring(0, p).trim();
+        total = cashText.substring(p + 2, cashText.length - 1);
+      } else if (cashText.charAt(0) === '$' || cashText.charAt(0) === '−') {
+        name = ''; total = cashText;   // cashier-less rows held only the total
+      }
+      sh.getRange(r, CASHIER_COL).setValue(name);
+      sh.getRange(r, 6).setValue(total);   // F becomes Sale Total
+      sh.getRange(r, 7).setValue(saleId);  // G becomes Sale ID
+    }
+  });
+  props.setProperty('cols_v2', '1');
 }
 
 /**

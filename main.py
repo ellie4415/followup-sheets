@@ -461,10 +461,11 @@ async def run_job(trigger: str) -> dict:
                 mgr_rows[tab].append([
                     ls.format_date(sale.get("timeStamp", "")),
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
-                    f"{cashier} ({_money(total)})" if cashier else _money(total),
+                    cashier,
                     _manager_items_text(items, employees, cashier),
                     _money(profit),
-                    str(sale_id),
+                    _money(total),
+                    str(sale_id),   # column G — the manager script's dedup column
                 ])
                 mgr_existing[tab].add(str(sale_id))
 
@@ -815,10 +816,11 @@ async def debug_sale(number: str):
                               (mgr_camera or mgr_threshold)]),
             "camera_or_lens_item_any_direction": mgr_camera,
             "abs_total_vs_threshold": abs(round(qualifying_total, 2)),
-            "cashier_column": (f"{cashier} ({_money(total)})" if cashier else _money(total)),
+            "cashier": cashier,
             "items_lines":
                 _manager_items_text(items, employees, cashier).split("\n"),
             "total_profit": _money(mgr_profit),
+            "sale_total": _money(total),
         }
 
         return {
