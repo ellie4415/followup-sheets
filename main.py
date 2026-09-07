@@ -42,6 +42,8 @@ SA_JSON       = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SHEET_ID      = os.environ.get("SHEET_ID", "")
 WEBAPP_URL    = os.environ.get("SHEETS_WEBAPP_URL", "")   # Apps Script bridge (preferred)
 SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
+MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
+MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
 RUN_HOUR      = int(os.environ.get("RUN_HOUR", "6"))          # daily run, Pacific
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))     # first run only
 PACIFIC       = ZoneInfo("America/Los_Angeles")
@@ -173,6 +175,14 @@ def _make_sheets():
     return sh.Sheets(SA_JSON, SHEET_ID)
 
 
+def _make_manager_sheets():
+    """The manager performance sheet (docs/manager-bridge.gs) — optional;
+    None disables that output entirely."""
+    if MANAGER_WEBAPP_URL and MANAGER_SECRET:
+        return sh.BridgeSheets(MANAGER_WEBAPP_URL, MANAGER_SECRET)
+    return None
+
+
 def _store_tab(shop_name: str) -> str:
     n = (shop_name or "").lower()
     if "reno" in n:
@@ -182,11 +192,19 @@ def _store_tab(shop_name: str) -> str:
     return ""
 
 
+def _fnum(v) -> float:
+    try:
+        return float(v or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _line_items(lines: list) -> list:
-    """[(name, qty, category_id, subtotal, employee_id), ...] for every real
-    line on the sale. employee_id is the LINE's employee — who actually sold
-    the item — which can differ from whoever completed the sale at the
-    register."""
+    """One dict per real line on the sale. employee_id is the LINE's employee
+    — who actually sold the item — which can differ from whoever completed
+    the sale at the register. cost is the line's cost basis (FIFO, falling
+    back to average cost) scaled by quantity, for the manager sheet's profit
+    column."""
     out = []
     for sl in lines:
         item = sl.get("Item") if isinstance(sl.get("Item"), dict) else {}
@@ -199,21 +217,38 @@ def _line_items(lines: list) -> list:
             qty = int(float(sl.get("unitQuantity") or 1))
         except (ValueError, TypeError):
             qty = 1
-        cat_id = str(item.get("categoryID") or sl.get("categoryID") or "")
-        try:
-            subtotal = float(sl.get("calcSubtotal") or sl.get("displayableSubtotal") or 0)
-        except (ValueError, TypeError):
-            subtotal = 0.0
-        emp_id = str(sl.get("employeeID") or "")
-        out.append((name, qty, cat_id, subtotal, emp_id))
+        fifo = _fnum(sl.get("fifoCost"))
+        avg  = _fnum(sl.get("avgCost"))
+        unit_cost = fifo if fifo > 0 else avg
+        out.append({
+            "name":     name,
+            "qty":      qty,
+            "cat_id":   str(item.get("categoryID") or sl.get("categoryID") or ""),
+            "subtotal": _fnum(sl.get("calcSubtotal") or sl.get("displayableSubtotal")),
+            "emp_id":   str(sl.get("employeeID") or ""),
+            "cost":     unit_cost * qty,
+            "fifo_raw": fifo,
+            "avg_raw":  avg,
+        })
     return out
 
 
 def _purchased_text(items: list) -> str:
     # One line item per line — multiline cell in Sheets.
     parts = []
-    for name, qty, _, _, _ in items:
-        parts.append(f"{name} ×{qty}" if qty > 1 else name)
+    for li in items:
+        parts.append(f"{li['name']} ×{li['qty']}" if li["qty"] > 1 else li["name"])
+    return "\n".join(parts)
+
+
+def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
+    """'Canon R6 ×2 — Josh Wool' per line: every item tagged with who sold
+    it (line attribution, else the cashier) so add-on selling is visible."""
+    parts = []
+    for li in items:
+        who   = employees.get(li["emp_id"], "") or cashier or "?"
+        qty_s = f" ×{li['qty']}" if li["qty"] > 1 else ""
+        parts.append(f"{li['name']}{qty_s} — {who}")
     return "\n".join(parts)
 
 
@@ -230,12 +265,14 @@ def _salespeople(items: list, qual_ids: set, excl_ids: set,
                 seen.append(nm)
         return seen
 
-    names = names_for([e for _, qty, c, _, e in items
-                       if qty > 0 and c in qual_ids and c not in excl_ids
-                       and e not in ("", "0")])
+    names = names_for([li["emp_id"] for li in items
+                       if li["qty"] > 0 and li["cat_id"] in qual_ids
+                       and li["cat_id"] not in excl_ids
+                       and li["emp_id"] not in ("", "0")])
     if not names:
-        names = names_for([e for _, _, c, _, e in items
-                           if c not in excl_ids and e not in ("", "0")])
+        names = names_for([li["emp_id"] for li in items
+                           if li["cat_id"] not in excl_ids
+                           and li["emp_id"] not in ("", "0")])
     if not names:
         names = names_for([sale_emp_id])
     return names
@@ -322,6 +359,14 @@ async def run_job(trigger: str) -> dict:
         for tab in sh.STORE_TABS:
             existing[tab] = await sheet.existing_sale_ids(tab)
 
+        manager = _make_manager_sheets()
+        mgr_rows: dict = {t: [] for t in sh.STORE_TABS}
+        mgr_existing: dict = {}
+        if manager is not None:
+            await manager.ensure_setup()
+            for tab in sh.STORE_TABS:
+                mgr_existing[tab] = await manager.existing_sale_ids(tab)
+
         rows_by_tab: dict = {t: [] for t in sh.STORE_TABS}
         customer_cache: dict = {}
         max_id = cursor
@@ -356,30 +401,58 @@ async def run_job(trigger: str) -> dict:
                 skip("refund / zero total")
                 continue
 
-            customer_id = str(sale.get("customerID") or "0")
-            if customer_id in ("", "0"):
-                skip("no customer on sale")
-                continue
+            customer_id  = str(sale.get("customerID") or "0")
+            has_customer = customer_id not in ("", "0")
 
             lines = await client.get_sale_lines(str(sale_id))
             items = _line_items(lines)
 
-            camera_hit = any(qty > 0 and cat_id in qual_ids and cat_id not in excl_ids
-                             for _, qty, cat_id, _, _ in items)
+            camera_hit = any(li["qty"] > 0 and li["cat_id"] in qual_ids
+                             and li["cat_id"] not in excl_ids for li in items)
             # Threshold counts qualifying merchandise only: pre-tax, excluded
             # categories (repairs, lab work) don't count. Negative lines
             # (returns on an exchange) net against it.
-            qualifying_total = sum(sub for _, _, cat_id, sub, _ in items
-                                   if cat_id not in excl_ids)
+            qualifying_total = sum(li["subtotal"] for li in items
+                                   if li["cat_id"] not in excl_ids)
             over_threshold = threshold > 0 and qualifying_total >= threshold
-            if not (camera_hit or over_threshold):
+            fu_candidate   = camera_hit or over_threshold
+
+            # Manager sheet: any completed sale with at least one merchandise
+            # (non-excluded) item — walk-ins included, no email requirement.
+            mgr_candidate = (manager is not None
+                             and str(sale_id) not in mgr_existing[tab]
+                             and any(li["cat_id"] not in excl_ids for li in items))
+
+            customer: dict = {}
+            if has_customer and (mgr_candidate or fu_candidate):
+                if customer_id not in customer_cache:
+                    customer_cache[customer_id] = await client.get_customer(customer_id)
+                customer = customer_cache[customer_id]
+
+            if mgr_candidate:
+                c_first = (customer.get("firstName") or "").strip()
+                c_last  = (customer.get("lastName") or "").strip()
+                cashier = employees.get(str(sale.get("employeeID", "")), "")
+                profit  = sum(li["subtotal"] - li["cost"] for li in items
+                              if li["cat_id"] not in excl_ids)
+                mgr_rows[tab].append([
+                    ls.format_date(sale.get("timeStamp", "")),
+                    f"{c_first} {c_last}".strip() or "(Walk-in)",
+                    cashier,
+                    _manager_items_text(items, employees, cashier),
+                    f"${profit:,.2f}",
+                    str(sale_id),
+                ])
+                mgr_existing[tab].add(str(sale_id))
+
+            # ── Follow-up sheet (original rules: customer + email required) ──
+            if not has_customer:
+                skip("no customer on sale")
+                continue
+            if not fu_candidate:
                 skip("not a qualifying purchase")
                 continue
-
-            if customer_id not in customer_cache:
-                customer_cache[customer_id] = await client.get_customer(customer_id)
-            customer = customer_cache[customer_id]
-            emails   = ls.customer_emails(customer)
+            emails = ls.customer_emails(customer)
             if not emails:
                 skip("customer has no email")
                 continue
@@ -432,6 +505,10 @@ async def run_job(trigger: str) -> dict:
         for tab, rows in rows_by_tab.items():
             await sheet.append_rows(tab, rows)
             summary["added"][tab] = len(rows)
+        if manager is not None:
+            for tab in sh.STORE_TABS:
+                await manager.append_rows(tab, mgr_rows[tab])
+                summary["added"][f"{tab} (manager)"] = len(mgr_rows[tab])
 
         # Advance the cursor only after every append succeeded — a Sheets
         # failure means the whole batch is retried next run (the sheet-side
@@ -516,6 +593,8 @@ async def home(request: Request):
             "Lightspeed client secret (LIGHTSPEED_CLIENT_SECRET)":    bool(CLIENT_SECRET),
             "Google Sheets connection (SHEETS_WEBAPP_URL + SHEETS_SECRET, "
             "or service account)":                                    _sheets_configured(),
+            "Manager sheet — optional (MANAGER_WEBAPP_URL + "
+            "MANAGER_SECRET)":                                        _make_manager_sheets() is not None,
         },
     })
 
@@ -646,18 +725,22 @@ async def debug_sale(number: str):
         threshold = settings["threshold"]
 
         line_report = []
-        for name, qty, cat_id, sub, emp_id in items:
-            qualifies = qty > 0 and cat_id in qual_ids and cat_id not in excl_ids
-            excluded  = cat_id in excl_ids
+        for li in items:
+            qualifies = (li["qty"] > 0 and li["cat_id"] in qual_ids
+                         and li["cat_id"] not in excl_ids)
+            excluded  = li["cat_id"] in excl_ids
             line_report.append({
-                "item":            name,
-                "qty":             qty,
-                "subtotal":        sub,
-                "category":        ls.category_path(categories, cat_id),
-                "sold_by":         employees.get(emp_id, "(none on line)"),
+                "item":            li["name"],
+                "qty":             li["qty"],
+                "subtotal":        li["subtotal"],
+                "category":        ls.category_path(categories, li["cat_id"]),
+                "sold_by":         employees.get(li["emp_id"], "(none on line)"),
                 "qualifying_item": qualifies,
                 "excluded":        excluded,
                 "counts_toward_threshold": not excluded,
+                "cost_basis":      {"fifoCost": li["fifo_raw"], "avgCost": li["avg_raw"],
+                                    "cost_used": round(li["cost"], 2)},
+                "profit":          round(li["subtotal"] - li["cost"], 2),
             })
 
         camera_hit = any(l["qualifying_item"] for l in line_report)

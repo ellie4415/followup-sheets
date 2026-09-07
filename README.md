@@ -61,6 +61,17 @@ If both routes are configured, the Apps Script bridge wins.
 3. Open the app, click **Connect Lightspeed**, approve.
 4. Click **Run now**. First run pulls the last 7 days (`LOOKBACK_DAYS`).
 
+## Manager performance sheet (optional second output)
+
+A separate spreadsheet for managers: every completed merchandise sale
+(walk-ins included, no email filter), columns Date | Customer | Cashier |
+Items — each item tagged with who sold it — | Total Profit | Sale ID.
+Setup mirrors the follow-up sheet: create a NEW blank spreadsheet (it holds
+profit data — share with managers only), paste
+[`docs/manager-bridge.gs`](docs/manager-bridge.gs) into its Apps Script with
+its own secret, deploy as a web app, and set `MANAGER_WEBAPP_URL` +
+`MANAGER_SECRET` in Railway. Backfill it with the **Re-import** button.
+
 ## Env vars
 
 | Variable | Purpose |
@@ -68,6 +79,7 @@ If both routes are configured, the Apps Script bridge wins.
 | `APP_URL` | Public base URL; drives the OAuth redirect URI |
 | `LIGHTSPEED_CLIENT_ID` / `LIGHTSPEED_CLIENT_SECRET` | This app's own OAuth client |
 | `SHEETS_WEBAPP_URL` / `SHEETS_SECRET` | Apps Script bridge URL + shared secret (preferred route) |
+| `MANAGER_WEBAPP_URL` / `MANAGER_SECRET` | Manager performance sheet bridge (optional) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` / `SHEET_ID` | Service-account fallback route |
 | `DATA_DIR` | Volume mount path (`/data` on Railway) |
 | `RUN_HOUR` | Daily run hour, Pacific (default 6) |

@@ -15,7 +15,23 @@ This app exists SEPARATELY from `/Users/actioncamera/lab-sync` on purpose:
 - Own repo, own Railway service, own SQLite state. No shared code imports,
   no shared DB. A bug here must never be able to touch lab order syncing.
 
-## Qualification rule (the product)
+## Two outputs, one run (since Sept 2026)
+
+The same poll feeds two spreadsheets:
+1. **Follow-up sheet** (SHEETS_WEBAPP_URL/SHEETS_SECRET, docs/sheets-bridge.gs)
+   — the original product; rules below.
+2. **Manager performance sheet** (MANAGER_WEBAPP_URL/MANAGER_SECRET,
+   docs/manager-bridge.gs — a SEPARATE spreadsheet holding profit data;
+   optional, disabled when unconfigured). Row per completed Reno/Rocklin
+   sale with ≥1 non-excluded item — walk-ins included, NO email/category/
+   threshold requirement. Columns: Date | Customer | Cashier | Items (one
+   per line, each "item — seller" from LINE-level employeeID) | Total
+   Profit (non-excluded lines only: calcSubtotal − fifoCost×qty, avgCost
+   fallback) | Sale ID (col F — that script's dedup column).
+Both dedup by sale ID; the cursor advances only after BOTH sheets' appends
+succeed, so a failure on either retries the whole batch harmlessly.
+
+## Qualification rule (the follow-up product)
 
 Sale is logged when: `completed == 'true'` AND not voided AND total > 0
 AND shop maps to Reno/Rocklin (skip-shops list excludes "Action Camera
