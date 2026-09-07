@@ -250,9 +250,9 @@ def _money(v: float) -> str:
 
 
 def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
-    """'Item ×2 (return) — Seller' one per line (Ellie's chosen format).
-    The trailing ' — Name' is load-bearing: the manager bridge script parses
-    it to color each line by employee — keep the separator exactly ' — '."""
+    """'Seller — Item ×2 (return)' one per line (Ellie's chosen format).
+    The leading 'Name — ' is load-bearing: the manager bridge script parses
+    it to color the name — keep the separator exactly ' — '."""
     parts = []
     for li in items:
         who   = employees.get(li["emp_id"], "") or cashier or "?"
@@ -261,7 +261,7 @@ def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
             label += f" ×{li['qty']}"
         if li["subtotal"] < 0:
             label += " (return)"
-        parts.append(f"{label} — {who}")
+        parts.append(f"{who} — {label}")
     return "\n".join(parts)
 
 

@@ -102,8 +102,8 @@ function doPost(e) {
 }
 
 function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
-  // Items cell: item text stays BLACK; only the employee name after the
-  // final " — " takes that employee's color (bold, so it reads at a glance).
+  // Items cell ("Name — item" per line): item text stays BLACK; only the
+  // employee name BEFORE the first " — " takes that employee's color (bold).
   // Sheets cannot background-highlight PART of a cell — text styling is the
   // only per-character tool — so the true highlight lives on the Cashier cell.
   if (itemsText) {
@@ -113,11 +113,11 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
       .setTextStyle(0, itemsText.length, black);
     let pos = 0;
     itemsText.split('\n').forEach(function (line) {
-      const sep = line.lastIndexOf(' — ');
-      if (sep >= 0 && line.length) {
-        const emp = line.substring(sep + 3).trim();
+      const sep = line.indexOf(' — ');
+      if (sep > 0) {
+        const emp = line.substring(0, sep).trim();
         if (emp && emp !== '?') {
-          b.setTextStyle(pos + sep + 3, pos + line.length,
+          b.setTextStyle(pos, pos + sep,
             SpreadsheetApp.newTextStyle()
               .setForegroundColor(colorsFor_(emp).text).setBold(true).build());
         }
@@ -135,6 +135,39 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
       sh.getRange(rowIdx, CASHIER_COL).setBackground(colorsFor_(nm).bg);
     }
   }
+}
+
+/**
+ * ONE-TIME migration: flips existing "Item — Name" lines to "Name — Item"
+ * and recolors them. Run it once from the function dropdown after updating
+ * this script; a guard flag refuses a second run (which would swap the
+ * lines back). Delete the 'flip_done' Script Property to override.
+ */
+function flipItemLines() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('flip_done')) {
+    throw new Error('flipItemLines already ran — running again would swap lines back to Item — Name.');
+  }
+  const ss = SpreadsheetApp.getActive();
+  STORE_TABS.forEach(function (tabName) {
+    const sh = ss.getSheetByName(tabName);
+    if (!sh) return;
+    const last = lastDataRow_(sh);
+    for (let r = 2; r <= last; r++) {
+      const cell = sh.getRange(r, ITEMS_COL);
+      const text = String(cell.getValue() || '');
+      if (!text) continue;
+      const flipped = text.split('\n').map(function (line) {
+        const sep = line.lastIndexOf(' — ');
+        if (sep < 0) return line;
+        return line.substring(sep + 3).trim() + ' — ' + line.substring(0, sep);
+      }).join('\n');
+      cell.setValue(flipped);
+      colorizeRow_(sh, r, flipped,
+                   String(sh.getRange(r, CASHIER_COL).getValue() || ''));
+    }
+  });
+  props.setProperty('flip_done', '1');
 }
 
 /**
