@@ -22,16 +22,26 @@ const SALE_ID_COL = 6; // column F
 const CASHIER_COL = 3;
 const ITEMS_COL   = 4;
 
-// Each employee gets a stable text color (hash of their name) so multi-person
-// sales are scannable at a glance. Colors chosen to stay readable on white
-// and on table banding.
-const PALETTE = ['#1155cc', '#188038', '#b45309', '#8e24aa', '#c2185b',
-                 '#00796b', '#e65100', '#283593', '#5d4037', '#455a64'];
+// Each employee gets a stable color pair, assigned FIRST-COME FIRST-SERVED
+// (not hashed — hashing made different people land on similar colors) and
+// remembered forever in Script Properties. DARK is used for the name text
+// in the Items column; PASTEL is the matching full-cell highlight for the
+// Cashier column. The two lists are index-paired — keep them in sync.
+const DARK   = ['#1155cc', '#b45309', '#188038', '#8e24aa', '#c2185b', '#00796b',
+                '#e65100', '#283593', '#a50e0e', '#827717', '#0277bd', '#5d4037'];
+const PASTEL = ['#d0e0fc', '#fde3c8', '#d3efdb', '#eed5f5', '#f9d3e2', '#ccebe7',
+                '#fcdecb', '#d6d9f3', '#f7d1d1', '#eff0c3', '#cfeafc', '#e6dad6'];
 
-function colorFor_(name) {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
+function colorsFor_(name) {
+  const props = PropertiesService.getScriptProperties();
+  let idx = props.getProperty('empcolor:' + name);
+  if (idx === null) {
+    const next = parseInt(props.getProperty('empcolor:_next') || '0', 10);
+    idx = String(next % DARK.length);
+    props.setProperty('empcolor:' + name, idx);
+    props.setProperty('empcolor:_next', String(next + 1));
+  }
+  return { text: DARK[+idx], bg: PASTEL[+idx] };
 }
 
 function doGet(e) {
@@ -49,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 2, existing: existing });
+  return json_({ ok: true, v: 3, existing: existing });
 }
 
 function doPost(e) {
@@ -92,35 +102,58 @@ function doPost(e) {
 }
 
 function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
-  // Items cell: each "item — employee" line takes its employee's color.
+  // Items cell: item text stays BLACK; only the employee name after the
+  // final " — " takes that employee's color (bold, so it reads at a glance).
+  // Sheets cannot background-highlight PART of a cell — text styling is the
+  // only per-character tool — so the true highlight lives on the Cashier cell.
   if (itemsText) {
-    const b = SpreadsheetApp.newRichTextValue().setText(itemsText);
+    const black = SpreadsheetApp.newTextStyle()
+      .setForegroundColor('#000000').setBold(false).build();
+    const b = SpreadsheetApp.newRichTextValue().setText(itemsText)
+      .setTextStyle(0, itemsText.length, black);
     let pos = 0;
     itemsText.split('\n').forEach(function (line) {
       const sep = line.lastIndexOf(' — ');
       if (sep >= 0 && line.length) {
         const emp = line.substring(sep + 3).trim();
         if (emp && emp !== '?') {
-          b.setTextStyle(pos, pos + line.length, SpreadsheetApp.newTextStyle()
-            .setForegroundColor(colorFor_(emp)).build());
+          b.setTextStyle(pos + sep + 3, pos + line.length,
+            SpreadsheetApp.newTextStyle()
+              .setForegroundColor(colorsFor_(emp).text).setBold(true).build());
         }
       }
       pos += line.length + 1;
     });
     sh.getRange(rowIdx, ITEMS_COL).setRichTextValue(b.build());
   }
-  // Cashier cell ("Name ($total)"): the name takes that employee's color.
+  // Cashier cell ("Name ($total)"): whole-cell pastel highlight in that
+  // employee's color; text stays black.
   if (cashierText) {
     const paren = cashierText.indexOf(' (');
     const nm = (paren > 0 ? cashierText.substring(0, paren) : cashierText).trim();
     if (nm && nm !== '?' && nm.charAt(0) !== '$' && nm.charAt(0) !== '−') {
-      sh.getRange(rowIdx, CASHIER_COL).setRichTextValue(
-        SpreadsheetApp.newRichTextValue().setText(cashierText)
-          .setTextStyle(0, nm.length, SpreadsheetApp.newTextStyle()
-            .setForegroundColor(colorFor_(nm)).build())
-          .build());
+      sh.getRange(rowIdx, CASHIER_COL).setBackground(colorsFor_(nm).bg);
     }
   }
+}
+
+/**
+ * One-time restyle of every existing row (both store tabs) using the current
+ * color rules — run it from the editor's function dropdown after updating
+ * this script. Safe to run repeatedly; values are untouched, only styling.
+ */
+function recolorAll() {
+  const ss = SpreadsheetApp.getActive();
+  STORE_TABS.forEach(function (tabName) {
+    const sh = ss.getSheetByName(tabName);
+    if (!sh) return;
+    const last = lastDataRow_(sh);
+    for (let r = 2; r <= last; r++) {
+      colorizeRow_(sh, r,
+                   String(sh.getRange(r, ITEMS_COL).getValue() || ''),
+                   String(sh.getRange(r, CASHIER_COL).getValue() || ''));
+    }
+  });
 }
 
 function lastDataRow_(sh) {
