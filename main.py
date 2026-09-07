@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import secrets
+import sys
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -28,7 +29,10 @@ import lightspeed as ls
 import sheets as sh
 import store
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Log to STDOUT, not stderr — Railway paints all stderr output red, which
+# makes routine INFO lines look like a wall of errors in the deploy log.
+logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                    format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("followup")
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -593,6 +597,14 @@ async def scheduler_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    # Route uvicorn's own loggers (server + access lines) to stdout too —
+    # same Railway red-stderr reason as the basicConfig above.
+    out = logging.StreamHandler(sys.stdout)
+    out.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        lg.handlers = [out]
+        lg.propagate = False
     store.init()
     asyncio.create_task(scheduler_loop())
 
