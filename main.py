@@ -246,28 +246,19 @@ def _money(v: float) -> str:
 
 
 def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
-    """One line PER SELLER, not per item — a glance shows whether the
-    transaction was one person's or a team effort, and returns show as a
-    negative amount against whoever originally gets the line:
-
-        Blair Wright (−$800.00): Canon R6 (return)
-        Claire Krestel ($240.00): SD Card ×2, UV Filter
-    """
-    groups: dict = {}   # seller -> {"labels": [...], "net": float} (insertion order)
+    """'Item ×2 (return) — Seller' one per line (Ellie's chosen format).
+    The trailing ' — Name' is load-bearing: the manager bridge script parses
+    it to color each line by employee — keep the separator exactly ' — '."""
+    parts = []
     for li in items:
-        who = employees.get(li["emp_id"], "") or cashier or "?"
-        g = groups.setdefault(who, {"labels": [], "net": 0.0})
+        who   = employees.get(li["emp_id"], "") or cashier or "?"
         label = li["name"]
         if li["qty"] > 1:
             label += f" ×{li['qty']}"
         if li["subtotal"] < 0:
             label += " (return)"
-        g["labels"].append(label)
-        g["net"] += li["subtotal"]
-    return "\n".join(
-        f"{who} ({_money(g['net'])}): " + ", ".join(g["labels"])
-        for who, g in groups.items()
-    )
+        parts.append(f"{label} — {who}")
+    return "\n".join(parts)
 
 
 def _salespeople(items: list, qual_ids: set, excl_ids: set,
@@ -466,7 +457,7 @@ async def run_job(trigger: str) -> dict:
                 mgr_rows[tab].append([
                     ls.format_date(sale.get("timeStamp", "")),
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
-                    cashier,
+                    f"{cashier} ({_money(total)})" if cashier else _money(total),
                     _manager_items_text(items, employees, cashier),
                     _money(profit),
                     str(sale_id),
@@ -812,8 +803,8 @@ async def debug_sale(number: str):
                               (mgr_camera or mgr_threshold)]),
             "camera_or_lens_item_any_direction": mgr_camera,
             "abs_total_vs_threshold": abs(round(qualifying_total, 2)),
-            "cashier": cashier,
-            "items_grouped_by_seller":
+            "cashier_column": (f"{cashier} ({_money(total)})" if cashier else _money(total)),
+            "items_lines":
                 _manager_items_text(items, employees, cashier).split("\n"),
             "total_profit": _money(mgr_profit),
         }

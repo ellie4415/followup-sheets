@@ -16,9 +16,23 @@
 
 const SECRET = 'PASTE_SECRET_HERE';
 
-const HEADERS = ['Date', 'Customer', 'Cashier', 'Items', 'Total Profit', 'Sale ID'];
+const HEADERS = ['Date', 'Customer', 'Cashier (Sale Total)', 'Items', 'Total Profit', 'Sale ID'];
 const STORE_TABS = ['Reno', 'Rocklin'];
 const SALE_ID_COL = 6; // column F
+const CASHIER_COL = 3;
+const ITEMS_COL   = 4;
+
+// Each employee gets a stable text color (hash of their name) so multi-person
+// sales are scannable at a glance. Colors chosen to stay readable on white
+// and on table banding.
+const PALETTE = ['#1155cc', '#188038', '#b45309', '#8e24aa', '#c2185b',
+                 '#00796b', '#e65100', '#283593', '#5d4037', '#455a64'];
+
+function colorFor_(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
 
 function doGet(e) {
   if (!e || !e.parameter || e.parameter.secret !== SECRET) {
@@ -35,7 +49,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 1, existing: existing });
+  return json_({ ok: true, v: 2, existing: existing });
 }
 
 function doPost(e) {
@@ -65,11 +79,48 @@ function doPost(e) {
       if (overflow > 0) sh.insertRowsAfter(sh.getMaxRows(), overflow);
       sh.getRange(start, 1, a.rows.length, a.rows[0].length)
         .setValues(a.rows);
+      for (let i = 0; i < a.rows.length; i++) {
+        colorizeRow_(sh, start + i,
+                     String(a.rows[i][ITEMS_COL - 1] || ''),
+                     String(a.rows[i][CASHIER_COL - 1] || ''));
+      }
     });
   } finally {
     lock.releaseLock();
   }
   return json_({ ok: true });
+}
+
+function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
+  // Items cell: each "item — employee" line takes its employee's color.
+  if (itemsText) {
+    const b = SpreadsheetApp.newRichTextValue().setText(itemsText);
+    let pos = 0;
+    itemsText.split('\n').forEach(function (line) {
+      const sep = line.lastIndexOf(' — ');
+      if (sep >= 0 && line.length) {
+        const emp = line.substring(sep + 3).trim();
+        if (emp && emp !== '?') {
+          b.setTextStyle(pos, pos + line.length, SpreadsheetApp.newTextStyle()
+            .setForegroundColor(colorFor_(emp)).build());
+        }
+      }
+      pos += line.length + 1;
+    });
+    sh.getRange(rowIdx, ITEMS_COL).setRichTextValue(b.build());
+  }
+  // Cashier cell ("Name ($total)"): the name takes that employee's color.
+  if (cashierText) {
+    const paren = cashierText.indexOf(' (');
+    const nm = (paren > 0 ? cashierText.substring(0, paren) : cashierText).trim();
+    if (nm && nm !== '?' && nm.charAt(0) !== '$' && nm.charAt(0) !== '−') {
+      sh.getRange(rowIdx, CASHIER_COL).setRichTextValue(
+        SpreadsheetApp.newRichTextValue().setText(cashierText)
+          .setTextStyle(0, nm.length, SpreadsheetApp.newTextStyle()
+            .setForegroundColor(colorFor_(nm)).build())
+          .build());
+    }
+  }
 }
 
 function lastDataRow_(sh) {
