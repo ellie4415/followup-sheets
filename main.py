@@ -354,6 +354,8 @@ async def run_job(trigger: str) -> dict:
         prior      = store.get_json("pending_carts", []) or []
         first_seen = {str(p.get("id")): float(p.get("first_seen") or now) for p in prior}
         pending_next: list = []
+        recheck_ids: set = set()   # carts already on the watch list — a re-check
+                                   # that's STILL open is not a new "skip"
         for p in prior:
             pid = str(p.get("id") or "")
             if not pid or pid in batch_ids:
@@ -365,6 +367,7 @@ async def run_job(trigger: str) -> dict:
                 data = await client.get(f"Sale/{pid}.json")
                 s = data.get("Sale")
                 if isinstance(s, dict) and s:
+                    recheck_ids.add(pid)
                     sales.append(s)   # re-evaluated below like any new sale
             except ls.AuthExpired:
                 raise
@@ -394,7 +397,8 @@ async def run_job(trigger: str) -> dict:
             max_id  = max(max_id, sale_id)
 
             if str(sale.get("completed")) != "true":
-                skip("not completed (open register cart)")
+                if str(sale_id) not in recheck_ids:   # NEW open cart
+                    skip("not completed (open register cart)")
                 pending_next.append({"id": str(sale_id),
                                      "first_seen": first_seen.get(str(sale_id), now)})
                 continue
