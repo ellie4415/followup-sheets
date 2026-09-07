@@ -241,15 +241,33 @@ def _purchased_text(items: list) -> str:
     return "\n".join(parts)
 
 
+def _money(v: float) -> str:
+    return f"−${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
+
+
 def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
-    """'Canon R6 ×2 — Josh Wool' per line: every item tagged with who sold
-    it (line attribution, else the cashier) so add-on selling is visible."""
-    parts = []
+    """One line PER SELLER, not per item — a glance shows whether the
+    transaction was one person's or a team effort, and returns show as a
+    negative amount against whoever originally gets the line:
+
+        Blair Wright (−$800.00): Canon R6 (return)
+        Claire Krestel ($240.00): SD Card ×2, UV Filter
+    """
+    groups: dict = {}   # seller -> {"labels": [...], "net": float} (insertion order)
     for li in items:
-        who   = employees.get(li["emp_id"], "") or cashier or "?"
-        qty_s = f" ×{li['qty']}" if li["qty"] > 1 else ""
-        parts.append(f"{li['name']}{qty_s} — {who}")
-    return "\n".join(parts)
+        who = employees.get(li["emp_id"], "") or cashier or "?"
+        g = groups.setdefault(who, {"labels": [], "net": 0.0})
+        label = li["name"]
+        if li["qty"] > 1:
+            label += f" ×{li['qty']}"
+        if li["subtotal"] < 0:
+            label += " (return)"
+        g["labels"].append(label)
+        g["net"] += li["subtotal"]
+    return "\n".join(
+        f"{who} ({_money(g['net'])}): " + ", ".join(g["labels"])
+        for who, g in groups.items()
+    )
 
 
 def _salespeople(items: list, qual_ids: set, excl_ids: set,
@@ -397,9 +415,9 @@ async def run_job(trigger: str) -> dict:
                 total = float(sale.get("calcTotal") or 0)
             except (ValueError, TypeError):
                 total = 0.0
-            if total <= 0:
-                skip("refund / zero total")
-                continue
+            # NOTE: the refund/zero-total gate moved BELOW the manager block —
+            # exchanges (return + add-ons, often net-negative) belong on the
+            # manager sheet with the return attributed to the original seller.
 
             customer_id  = str(sale.get("customerID") or "0")
             has_customer = customer_id not in ("", "0")
@@ -417,14 +435,20 @@ async def run_job(trigger: str) -> dict:
             over_threshold = threshold > 0 and qualifying_total >= threshold
             fu_candidate   = camera_hit or over_threshold
 
-            # Manager sheet: any completed sale with at least one merchandise
-            # (non-excluded) item — walk-ins included, no email requirement.
+            # Manager sheet: SAME sale logic as the follow-up sheet — a
+            # camera/lens item or the dollar threshold — but direction-blind
+            # (a RETURNED camera also qualifies, threshold on absolute value)
+            # so exchanges land with the return attributed to the original
+            # seller. Walk-ins included, no email requirement.
+            mgr_camera    = any(li["cat_id"] in qual_ids and li["cat_id"] not in excl_ids
+                                for li in items)
+            mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
             mgr_candidate = (manager is not None
                              and str(sale_id) not in mgr_existing[tab]
-                             and any(li["cat_id"] not in excl_ids for li in items))
+                             and (mgr_camera or mgr_threshold))
 
             customer: dict = {}
-            if has_customer and (mgr_candidate or fu_candidate):
+            if has_customer and (mgr_candidate or (fu_candidate and total > 0)):
                 if customer_id not in customer_cache:
                     customer_cache[customer_id] = await client.get_customer(customer_id)
                 customer = customer_cache[customer_id]
@@ -440,12 +464,15 @@ async def run_job(trigger: str) -> dict:
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
                     cashier,
                     _manager_items_text(items, employees, cashier),
-                    f"${profit:,.2f}",
+                    _money(profit),
                     str(sale_id),
                 ])
                 mgr_existing[tab].add(str(sale_id))
 
             # ── Follow-up sheet (original rules: customer + email required) ──
+            if total <= 0:
+                skip("refund / zero total")
+                continue
             if not has_customer:
                 skip("no customer on sale")
                 continue
@@ -767,6 +794,26 @@ async def debug_sale(number: str):
             checks["shop_not_skipped"], checks["total_positive"], checks["has_customer"],
             (camera_hit or over_threshold),
         ])
+
+        cashier       = employees.get(str(sale.get("employeeID", "")), "")
+        mgr_camera    = any(li["cat_id"] in qual_ids and li["cat_id"] not in excl_ids
+                            for li in items)
+        mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
+        mgr_profit    = sum(li["subtotal"] - li["cost"] for li in items
+                            if li["cat_id"] not in excl_ids)
+        manager_view = {
+            "configured": _make_manager_sheets() is not None,
+            "would_add": all([checks["completed"], checks["not_voided"],
+                              checks["shop_recognized"], checks["shop_not_skipped"],
+                              (mgr_camera or mgr_threshold)]),
+            "camera_or_lens_item_any_direction": mgr_camera,
+            "abs_total_vs_threshold": abs(round(qualifying_total, 2)),
+            "cashier": cashier,
+            "items_grouped_by_seller":
+                _manager_items_text(items, employees, cashier).split("\n"),
+            "total_profit": _money(mgr_profit),
+        }
+
         return {
             "sale_id":      sale_id,
             "ticket":       str(sale.get("ticketNumber", "")),
@@ -775,6 +822,7 @@ async def debug_sale(number: str):
                               "over threshold" if over_threshold else "—"),
             "checks":       checks,
             "lines":        line_report,
+            "manager_sheet": manager_view,
             "note": "customer email is checked at run time and not shown here",
         }
     except ls.AuthExpired as exc:

@@ -22,12 +22,16 @@ The same poll feeds two spreadsheets:
    — the original product; rules below.
 2. **Manager performance sheet** (MANAGER_WEBAPP_URL/MANAGER_SECRET,
    docs/manager-bridge.gs — a SEPARATE spreadsheet holding profit data;
-   optional, disabled when unconfigured). Row per completed Reno/Rocklin
-   sale with ≥1 non-excluded item — walk-ins included, NO email/category/
-   threshold requirement. Columns: Date | Customer | Cashier | Items (one
-   per line, each "item — seller" from LINE-level employeeID) | Total
-   Profit (non-excluded lines only: calcSubtotal − fifoCost×qty, avgCost
-   fallback) | Sale ID (col F — that script's dedup column).
+   optional, disabled when unconfigured). SAME sale logic as the follow-up
+   sheet (camera/lens item or the threshold) but DIRECTION-BLIND: a
+   returned camera/lens qualifies too, and the threshold compares
+   abs(qualifying_total) — exchanges and refunds must land here with the
+   return attributed to the original seller (Ellie's sale-102042 example),
+   so the refund/zero-total gate sits AFTER the manager block. Walk-ins
+   included, no email requirement. Columns: Date | Customer | Cashier |
+   Items — grouped ONE LINE PER SELLER: "Name (net $): item, item (return)"
+   — | Total Profit (non-excluded lines: calcSubtotal − fifoCost×qty,
+   avgCost fallback) | Sale ID (col F — that script's dedup column).
 Both dedup by sale ID; the cursor advances only after BOTH sheets' appends
 succeed, so a failure on either retries the whole batch harmlessly.
 
