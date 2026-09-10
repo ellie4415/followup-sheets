@@ -78,9 +78,10 @@ class BridgeSheets:
     Apps Script web apps answer POSTs with a 302 to a one-time result URL —
     follow_redirects is required or every write looks like it failed."""
 
-    def __init__(self, webapp_url: str, secret: str):
-        self.url    = webapp_url
-        self.secret = secret
+    def __init__(self, webapp_url: str, secret: str, secret_name: str = "SHEETS_SECRET"):
+        self.url         = webapp_url
+        self.secret      = secret
+        self.secret_name = secret_name   # named in errors so the right sheet gets fixed
         self._state: dict = {}
 
     async def _get_state(self) -> dict:
@@ -101,7 +102,7 @@ class BridgeSheets:
             )
         if data.get("error"):
             raise SheetsError(f"Sheets bridge error: {data['error']} — "
-                              "check SHEETS_SECRET matches the script's SECRET.")
+                              f"check {self.secret_name} matches that sheet's script SECRET.")
         return data
 
     async def ensure_setup(self) -> None:

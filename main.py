@@ -186,7 +186,8 @@ def _make_manager_sheets():
     """The manager performance sheet (docs/manager-bridge.gs) — optional;
     None disables that output entirely."""
     if MANAGER_WEBAPP_URL and MANAGER_SECRET:
-        return sh.BridgeSheets(MANAGER_WEBAPP_URL, MANAGER_SECRET)
+        return sh.BridgeSheets(MANAGER_WEBAPP_URL, MANAGER_SECRET,
+                               secret_name="MANAGER_SECRET")
     return None
 
 

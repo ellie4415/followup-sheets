@@ -138,6 +138,18 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
 }
 
 /**
+ * Wipe all stored employee-color assignments (e.g. after a bad script
+ * version polluted them). Run it, then run recolorAll to reassign clean
+ * colors in first-seen order.
+ */
+function resetColors() {
+  const props = PropertiesService.getScriptProperties();
+  props.getKeys().forEach(function (k) {
+    if (k.indexOf('empcolor:') === 0) props.deleteProperty(k);
+  });
+}
+
+/**
  * ONE-TIME migration for the Sale Total column: existing rows have
  * "Name ($total)" in Cashier (col C) and Sale ID in col F. This splits the
  * total out of the cashier cell into new col F, moves Sale ID to col G,
