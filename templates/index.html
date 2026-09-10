@@ -109,9 +109,10 @@ async function runNow(btn) {
   poll();
 }
 async function reimport(btn) {
-  if (!confirm("Re-pull the last 7 days of sales?\n\nRows already on the sheet are left alone (no duplicates). If you want rows REGENERATED with new formatting/rules, delete them from the sheet first, then run this.")) return;
+  const days = prompt("Re-pull how many days back? (max 60)\n\nRows already on the sheets are left alone (no duplicates). If you want rows REGENERATED with new formatting/rules, delete them from the sheet first, then run this.", "7");
+  if (days === null) return;
   btn.disabled = true; btn.textContent = "Starting…";
-  await fetch("/reimport", { method: "POST" });
+  await fetch("/reimport?days=" + encodeURIComponent(parseInt(days, 10) || 0), { method: "POST" });
   poll();
 }
 async function poll() {

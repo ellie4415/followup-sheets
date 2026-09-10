@@ -127,8 +127,10 @@ async def fetch_new_sales(client: ls.LightspeedClient, cursor: int) -> list:
     yet (first run), falls back to a LOOKBACK_DAYS timestamp window."""
     since_str = ""
     if cursor <= 0:
-        since = datetime.now(tz=PACIFIC) - timedelta(days=LOOKBACK_DAYS)
+        days = int(store.get("reimport_days") or 0) or LOOKBACK_DAYS
+        since = datetime.now(tz=PACIFIC) - timedelta(days=days)
         since_str = since.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        log.info(f"Lookback window: {days} days (since {since_str})")
 
     collected: list = []
     url = None
@@ -570,6 +572,7 @@ async def run_job(trigger: str) -> dict:
         # dedup makes retries harmless).
         if max_id > cursor:
             store.set("cursor", str(max_id))
+        store.set("reimport_days", "")   # one-shot override, consumed
         store.set_json("pending_carts", pending_next[-500:])
         if full_check:
             store.set("pending_full_check", str(now))
@@ -692,12 +695,14 @@ async def trigger_run():
 
 
 @app.post("/reimport")
-async def trigger_reimport():
-    """Reset the cursor and re-pull the LOOKBACK_DAYS window. Safe to run any
-    time: sale IDs already on the sheet are skipped, so this only fills gaps —
-    to REGENERATE rows (new format/rules), delete them from the sheet first."""
+async def trigger_reimport(days: int = 0):
+    """Reset the cursor and re-pull the lookback window (?days=N overrides
+    the default for this one run, max 60). Safe to run any time: sale IDs
+    already on the sheet are skipped, so this only fills gaps — to REGENERATE
+    rows (new format/rules), delete them from the sheet first."""
     if _job_lock.locked():
         return JSONResponse({"ok": False, "error": "A run is already in progress"}, status_code=409)
+    store.set("reimport_days", str(min(max(days, 0), 60)))
     store.set("cursor", "0")
     asyncio.create_task(_run_job_guarded("re-import"))
     return {"ok": True}

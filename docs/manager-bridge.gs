@@ -138,6 +138,23 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
 }
 
 /**
+ * Wipe ALL data rows on both store tabs (headers stay) — for a clean
+ * regeneration via the app's Re-import. Deliberate nuclear option: only run
+ * when you intend to re-import immediately after.
+ */
+function clearAllDataRows() {
+  const ss = SpreadsheetApp.getActive();
+  STORE_TABS.forEach(function (tabName) {
+    const sh = ss.getSheetByName(tabName);
+    if (!sh) return;
+    const last = sh.getLastRow();
+    if (last >= 2) {
+      sh.getRange(2, 1, last - 1, sh.getMaxColumns()).clearContent().setBackground(null);
+    }
+  });
+}
+
+/**
  * Delete duplicate transaction rows (same Sale ID in column G), keeping the
  * first occurrence. Run once after fixing the deployment; safe to re-run.
  */
