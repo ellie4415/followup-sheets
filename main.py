@@ -48,7 +48,10 @@ WEBAPP_URL    = os.environ.get("SHEETS_WEBAPP_URL", "")   # Apps Script bridge (
 SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
-RUN_HOUR      = int(os.environ.get("RUN_HOUR", "6"))          # daily run, Pacific
+RUN_HOURS_START = int(os.environ.get("RUN_HOURS_START", "8"))   # first hourly run (Pacific)
+RUN_HOURS_END   = int(os.environ.get("RUN_HOURS_END", "20"))    # last hourly run (Pacific)
+if not (0 <= RUN_HOURS_START <= RUN_HOURS_END <= 23):
+    RUN_HOURS_START, RUN_HOURS_END = 0, 23
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))     # first run only
 PACIFIC       = ZoneInfo("America/Los_Angeles")
 
@@ -348,6 +351,13 @@ async def run_job(trigger: str) -> dict:
         batch_ids  = {str(s.get("saleID") or "") for s in sales}
         prior      = store.get_json("pending_carts", []) or []
         first_seen = {str(p.get("id")): float(p.get("first_seen") or now) for p in prior}
+        # With hourly runs, re-fetching ~500 mostly-abandoned carts every hour
+        # would be waste: hourly runs re-check only YOUNG carts (<48h — the
+        # ones that actually complete, e.g. same-day pickups); the full sweep
+        # of older carts happens once a day (>20h since the last one) and on
+        # re-imports.
+        full_check = (trigger == "re-import"
+                      or now - float(store.get("pending_full_check") or 0) > 20 * 3600)
         pending_next: list = []
         recheck_ids: set = set()   # carts already on the watch list — a re-check
                                    # that's STILL open is not a new "skip"
@@ -355,8 +365,12 @@ async def run_job(trigger: str) -> dict:
             pid = str(p.get("id") or "")
             if not pid or pid in batch_ids:
                 continue
-            if now - first_seen[pid] > 45 * 86400:
+            age = now - first_seen[pid]
+            if age > 45 * 86400:
                 log.info(f"Dropping open cart {pid} from the watch list (>45 days old)")
+                continue
+            if not full_check and age > 48 * 3600:
+                pending_next.append(p)   # old cart — the daily sweep handles it
                 continue
             try:
                 data = await client.get(f"Sale/{pid}.json")
@@ -543,6 +557,8 @@ async def run_job(trigger: str) -> dict:
         if max_id > cursor:
             store.set("cursor", str(max_id))
         store.set_json("pending_carts", pending_next[-500:])
+        if full_check:
+            store.set("pending_full_check", str(now))
         summary["watching_open_carts"] = len(pending_next)
 
         summary["ok"] = True
@@ -583,11 +599,14 @@ async def _run_job_guarded(trigger: str) -> None:
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
 async def scheduler_loop() -> None:
+    # Hourly at the top of the hour, open hours only (RUN_HOURS_START..END
+    # Pacific, inclusive). Overnight it sleeps until the next morning's first
+    # run, which also carries the daily full watch-list sweep (>20h gate).
     while True:
         now = datetime.now(tz=PACIFIC)
-        nxt = now.replace(hour=RUN_HOUR, minute=0, second=0, microsecond=0)
-        if nxt <= now:
-            nxt += timedelta(days=1)
+        nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        while not (RUN_HOURS_START <= nxt.hour <= RUN_HOURS_END):
+            nxt += timedelta(hours=1)
         store.set("next_run", nxt.strftime("%-m/%-d/%Y %-I:%M %p"))
         await asyncio.sleep((nxt - now).total_seconds())
         try:

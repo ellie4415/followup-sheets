@@ -74,7 +74,7 @@
               title="Re-pulls the last 7 days. Rows already on the sheet are skipped, so delete any rows you want regenerated first.">Re-import last 7 days</button>
     {% endif %}
     <table style="margin-top:14px">
-      <tr><td>Next scheduled run (daily)</td><td>{{ next_run or "—" }}</td></tr>
+      <tr><td>Next scheduled run (hourly during open hours)</td><td>{{ next_run or "—" }}</td></tr>
       {% if last_run %}
       <tr><td>Last run</td><td>{{ last_run.started }} ({{ last_run.trigger }})</td></tr>
       <tr><td>Result</td><td>
