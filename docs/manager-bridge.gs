@@ -138,6 +138,30 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
 }
 
 /**
+ * Delete duplicate transaction rows (same Sale ID in column G), keeping the
+ * first occurrence. Run once after fixing the deployment; safe to re-run.
+ */
+function removeDuplicateRows() {
+  const ss = SpreadsheetApp.getActive();
+  STORE_TABS.forEach(function (tabName) {
+    const sh = ss.getSheetByName(tabName);
+    if (!sh) return;
+    const last = sh.getLastRow();
+    if (last < 3) return;
+    const ids = sh.getRange(2, SALE_ID_COL, last - 1, 1).getValues();
+    const seen = {};
+    const toDelete = [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = String(ids[i][0] || '').trim();
+      if (!id) continue;
+      if (seen[id]) toDelete.push(i + 2);
+      else seen[id] = true;
+    }
+    for (let j = toDelete.length - 1; j >= 0; j--) sh.deleteRow(toDelete[j]);
+  });
+}
+
+/**
  * Wipe all stored employee-color assignments (e.g. after a bad script
  * version polluted them). Run it, then run recolorAll to reassign clean
  * colors in first-seen order.

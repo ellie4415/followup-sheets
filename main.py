@@ -714,9 +714,15 @@ async def debug_tabs():
         store_ids: set = set()
         for t in sh.STORE_TABS:
             store_ids |= tabs.get(t, set())
+        # Raw per-tab ID lists (bridge only) reveal duplicate rows, which the
+        # deduplicated sets can't show.
+        raw_lists = getattr(sheet, "_state", {}).get("existing", {})
         report = {}
         for tab, ids in sorted(tabs.items()):
             entry = {"rows": len(ids)}
+            raw = raw_lists.get(tab)
+            if raw is not None and len(raw) != len(ids):
+                entry["DUPLICATE_ROWS"] = len(raw) - len(ids)
             if tab not in sh.STORE_TABS:
                 entry["sale_ids_missing_from_store_tabs"] = sorted(ids - store_ids)
                 for t in sh.STORE_TABS:   # which store tab holds this person's sales
