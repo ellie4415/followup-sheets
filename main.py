@@ -48,6 +48,7 @@ WEBAPP_URL    = os.environ.get("SHEETS_WEBAPP_URL", "")   # Apps Script bridge (
 SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
+MIN_CAMERA_PRICE = float(os.environ.get("MIN_CAMERA_PRICE", "100"))  # cheap disposables/novelty cameras don't qualify
 RUN_HOURS_START = int(os.environ.get("RUN_HOURS_START", "8"))   # first hourly run (Pacific)
 RUN_HOURS_END   = int(os.environ.get("RUN_HOURS_END", "20"))    # last hourly run (Pacific)
 if not (0 <= RUN_HOURS_START <= RUN_HOURS_END <= 23):
@@ -253,6 +254,20 @@ def _money(v: float) -> str:
     return f"−${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
 
 
+def _unit_price(li: dict) -> float:
+    """Absolute per-unit price of a line (works for returns: -$1,150 ÷ -1 = $1,150)."""
+    qty = abs(li["qty"]) or 1
+    return abs(li["subtotal"]) / qty
+
+
+def _is_camera_line(li: dict, qual_ids: set, excl_ids: set) -> bool:
+    """A camera/lens line that counts as such: right category tree, not
+    excluded, and at/above the price floor — a $30 keychain camera is not a
+    camera purchase (MIN_CAMERA_PRICE, Ellie's rule Sept 10 2026)."""
+    return (li["cat_id"] in qual_ids and li["cat_id"] not in excl_ids
+            and _unit_price(li) >= MIN_CAMERA_PRICE)
+
+
 def _manager_items_text(items: list, employees: dict, cashier: str) -> str:
     """'Seller — Item ×2 (return)' one per line (Ellie's chosen format).
     The leading 'Name — ' is load-bearing: the manager bridge script parses
@@ -283,8 +298,7 @@ def _salespeople(items: list, qual_ids: set, excl_ids: set,
         return seen
 
     names = names_for([li["emp_id"] for li in items
-                       if li["qty"] > 0 and li["cat_id"] in qual_ids
-                       and li["cat_id"] not in excl_ids
+                       if li["qty"] > 0 and _is_camera_line(li, qual_ids, excl_ids)
                        and li["emp_id"] not in ("", "0")])
     if not names:
         names = names_for([li["emp_id"] for li in items
@@ -439,8 +453,8 @@ async def run_job(trigger: str) -> dict:
             lines = await client.get_sale_lines(str(sale_id))
             items = _line_items(lines)
 
-            camera_hit = any(li["qty"] > 0 and li["cat_id"] in qual_ids
-                             and li["cat_id"] not in excl_ids for li in items)
+            camera_hit = any(li["qty"] > 0 and _is_camera_line(li, qual_ids, excl_ids)
+                             for li in items)
             # Threshold counts qualifying merchandise only: pre-tax, excluded
             # categories (repairs, lab work) don't count. Negative lines
             # (returns on an exchange) net against it.
@@ -454,8 +468,7 @@ async def run_job(trigger: str) -> dict:
             # (a RETURNED camera also qualifies, threshold on absolute value)
             # so exchanges land with the return attributed to the original
             # seller. Walk-ins included, no email requirement.
-            mgr_camera    = any(li["cat_id"] in qual_ids and li["cat_id"] not in excl_ids
-                                for li in items)
+            mgr_camera    = any(_is_camera_line(li, qual_ids, excl_ids) for li in items)
             mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
             mgr_candidate = (manager is not None
                              and str(sale_id) not in mgr_existing[tab]
@@ -781,13 +794,13 @@ async def debug_sale(number: str):
 
         line_report = []
         for li in items:
-            qualifies = (li["qty"] > 0 and li["cat_id"] in qual_ids
-                         and li["cat_id"] not in excl_ids)
+            qualifies = li["qty"] > 0 and _is_camera_line(li, qual_ids, excl_ids)
             excluded  = li["cat_id"] in excl_ids
             line_report.append({
                 "item":            li["name"],
                 "qty":             li["qty"],
                 "subtotal":        li["subtotal"],
+                "unit_price":      round(_unit_price(li), 2),
                 "category":        ls.category_path(categories, li["cat_id"]),
                 "sold_by":         employees.get(li["emp_id"], "(none on line)"),
                 "qualifying_item": qualifies,
@@ -814,6 +827,7 @@ async def debug_sale(number: str):
             "has_customer":         str(sale.get("customerID") or "0") not in ("", "0"),
             "camera_or_lens_item":  camera_hit,
             "threshold":            threshold,
+            "min_camera_price":     MIN_CAMERA_PRICE,
             "qualifying_total_pre_tax_non_excluded": round(qualifying_total, 2),
             "over_threshold":       over_threshold,
         }
@@ -824,8 +838,7 @@ async def debug_sale(number: str):
         ])
 
         cashier       = employees.get(str(sale.get("employeeID", "")), "")
-        mgr_camera    = any(li["cat_id"] in qual_ids and li["cat_id"] not in excl_ids
-                            for li in items)
+        mgr_camera    = any(_is_camera_line(li, qual_ids, excl_ids) for li in items)
         mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
         mgr_profit    = sum(li["subtotal"] - li["cost"] for li in items
                             if li["cat_id"] not in excl_ids)
