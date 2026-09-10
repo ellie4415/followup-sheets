@@ -84,10 +84,25 @@ class BridgeSheets:
         self.secret_name = secret_name   # named in errors so the right sheet gets fixed
         self._state: dict = {}
 
+    def _http_error(self, exc: httpx.HTTPStatusError) -> SheetsError:
+        code = exc.response.status_code
+        hint = (" — a 404 usually means the web-app deployment was archived/"
+                "deleted or replaced by a 'New deployment' with a different "
+                "URL; open Manage deployments in that sheet's Apps Script and "
+                f"make sure the ACTIVE deployment's /exec URL is what the "
+                f"{self.secret_name.replace('_SECRET', '_WEBAPP_URL')} env var holds"
+                if code == 404 else "")
+        return SheetsError(
+            f"The {self.secret_name.replace('_SECRET', '')} sheet bridge "
+            f"returned HTTP {code}{hint}")
+
     async def _get_state(self) -> dict:
         async with httpx.AsyncClient(follow_redirects=True) as http:
             r = await http.get(self.url, params={"secret": self.secret}, timeout=60)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise self._http_error(exc) from exc
         data = self._parse(r)
         self._state = data
         return data
@@ -132,7 +147,10 @@ class BridgeSheets:
                 json={"secret": self.secret, "appends": [{"tab": tab, "rows": rows}]},
                 timeout=60,
             )
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise self._http_error(exc) from exc
         data = self._parse(r)
         if not data.get("ok"):
             raise SheetsError(f"Sheets bridge append failed: {data}")
