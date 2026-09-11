@@ -135,7 +135,35 @@ async def get_client() -> ls.LightspeedClient:
 
 # ── Sale fetching (sort=-saleID pagination; this account rejects timestamp filters) ──
 
-BULK_RELATIONS = '["SaleLines","SaleLines.Item","Customer","Customer.Contact"]'
+BULK_RELATIONS = '["SaleLines","SaleLines.Item","Customer","Customer.Contact","SalePayments","SalePayments.PaymentType"]'
+# Sales paid ENTIRELY with these payment types are charged to a customer
+# account (POs pushed through the register) — no money received that day, so
+# they never count as a Sale of the Week (Ellie, Sept 11 2026).
+PO_PAYMENT_TYPES = [t.strip().lower() for t in
+                    os.environ.get("PO_PAYMENT_TYPES", "Credit Account").split(",") if t.strip()]
+
+
+async def _sale_payments(client: ls.LightspeedClient, sale: dict) -> list:
+    """[{type, amount}] — embedded by the bulk fetch when available, else one call."""
+    emb = sale.get("SalePayments")
+    raw = ls.as_list(emb.get("SalePayment")) if isinstance(emb, dict) else None
+    if raw is None:
+        raw = await client.get_sale_payments(str(sale.get("saleID")))
+    out = []
+    for sp in raw:
+        pt = sp.get("PaymentType") if isinstance(sp.get("PaymentType"), dict) else {}
+        out.append({"type": str(pt.get("name") or sp.get("paymentTypeID") or "?"),
+                    "amount": _fnum(sp.get("amount"))})
+    return out
+
+
+def _is_po(payments: list, total: float) -> bool:
+    """True when the on-account payments cover the whole sale."""
+    if total <= 0:
+        return False
+    on_account = sum(p["amount"] for p in payments
+                     if any(k in p["type"].lower() for k in PO_PAYMENT_TYPES))
+    return on_account >= total - 0.01
 
 
 def _bulk_relations_ok() -> bool:
@@ -703,6 +731,49 @@ async def run_job(trigger: str) -> dict:
     return summary
 
 
+async def _weekly_candidates(client, settings: dict, excl_ids: set, shops: dict,
+                             days: int = 7) -> dict:
+    """Per store tab: every completed, paid, non-refund sale of the window
+    with its merchandise profit — (profit, immediate, total, sale, items)."""
+    sales = await fetch_new_sales(client, 0, window_days=days)
+    candidates: dict = {t: [] for t in sh.STORE_TABS}
+    for sale in sales:
+        if str(sale.get("completed")) != "true" or str(sale.get("voided")) == "true":
+            continue
+        shop_name = shops.get(str(sale.get("shopID", "")), "")
+        if shop_name.strip().lower() in settings["skip_shops"]:
+            continue
+        tab = _store_tab(shop_name)
+        if not tab:
+            continue
+        total = _fnum(sale.get("calcTotal"))
+        if total <= 0:
+            continue   # refunds/exchanges are never the sale of the week
+        items  = _line_items(await _lines_for(client, sale))
+        profit = sum(_line_profit(li) for li in items if li["cat_id"] not in excl_ids)
+        if profit > 0:
+            immediate = sum(_line_profit(li, 0) for li in items
+                            if li["cat_id"] not in excl_ids)
+            candidates[tab].append((profit, immediate, total, sale, items))
+    return candidates
+
+
+async def _pick_top(client, cands: list, n: int) -> tuple:
+    """Highest-profit sales first, skipping POs (fully charged to a customer
+    account). Payments are only inspected for sales near the top, so the
+    check costs at most a handful of extra calls even on the fallback path."""
+    picked, po_skipped = [], 0
+    for cand in sorted(cands, key=lambda c: c[0], reverse=True):
+        if len(picked) >= n:
+            break
+        profit, immediate, total, sale, items = cand
+        if _is_po(await _sale_payments(client, sale), total):
+            po_skipped += 1
+            continue
+        picked.append(cand)
+    return picked, po_skipped
+
+
 async def weekly_job(trigger: str) -> dict:
     """Sales of the Week: rank the past 7 days of ALL transactions per store
     by merchandise profit (same definition as the Total Profit column) and
@@ -734,27 +805,7 @@ async def weekly_job(trigger: str) -> dict:
         shops      = await client.get_shops()
         employees  = await client.get_employees()
 
-        sales = await fetch_new_sales(client, 0, window_days=7)
-        candidates: dict = {t: [] for t in sh.STORE_TABS}
-        for sale in sales:
-            if str(sale.get("completed")) != "true" or str(sale.get("voided")) == "true":
-                continue
-            shop_name = shops.get(str(sale.get("shopID", "")), "")
-            if shop_name.strip().lower() in settings["skip_shops"]:
-                continue
-            tab = _store_tab(shop_name)
-            if not tab:
-                continue
-            total = _fnum(sale.get("calcTotal"))
-            if total <= 0:
-                continue   # refunds/exchanges are never the sale of the week
-            items  = _line_items(await _lines_for(client, sale))
-            profit = sum(_line_profit(li) for li in items
-                         if li["cat_id"] not in excl_ids)
-            if profit > 0:
-                immediate = sum(_line_profit(li, 0) for li in items
-                                if li["cat_id"] not in excl_ids)
-                candidates[tab].append((profit, immediate, total, sale, items))
+        candidates = await _weekly_candidates(client, settings, excl_ids, shops, days=7)
 
         for tab in sh.STORE_TABS:
             ytab = f"{tab} {week_end.year}"
@@ -762,7 +813,9 @@ async def weekly_job(trigger: str) -> dict:
             if week_id in on_sheet:
                 summary["added"][ytab] = "already posted"
                 continue
-            ranked = sorted(candidates[tab], key=lambda c: c[0], reverse=True)[:TOP_SALES_PER_WEEK]
+            ranked, po_skipped = await _pick_top(client, candidates[tab], TOP_SALES_PER_WEEK)
+            if po_skipped:
+                summary.setdefault("po_skipped", {})[ytab] = po_skipped
             lines = []
             for rank, (profit, immediate, total, sale, items) in enumerate(ranked, start=1):
                 sellers = _salespeople(items, qual_ids, excl_ids, employees,
@@ -997,6 +1050,51 @@ async def debug_tabs():
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
 
+@app.get("/debug-weekly")
+async def debug_weekly(days: int = 7, top: int = 5):
+    """Preview the Sales-of-the-Week ranking without posting: top N per
+    store with payment types, PO flag, and whether each sale has its own row."""
+    try:
+        manager = _make_manager_sheets()
+        client  = await get_client()
+        sheet   = _make_sheets()
+        await sheet.ensure_setup()
+        settings   = await sheet.read_settings()
+        categories = await client.get_categories()
+        excl_ids   = ls.category_ids_under(categories, settings["excluded"])
+        shops      = await client.get_shops()
+        employees  = await client.get_employees()
+        cands = await _weekly_candidates(client, settings, excl_ids, shops, days=days)
+        out = {}
+        for tab in sh.STORE_TABS:
+            ytab = f"{tab} {datetime.now(tz=PACIFIC).year}"
+            on_sheet = set()
+            if manager is not None:
+                await manager.ensure_setup()
+                on_sheet = await manager.existing_sale_ids(ytab)
+            rows = []
+            for profit, immediate, total, sale, items in sorted(cands[tab], key=lambda c: c[0], reverse=True)[:top]:
+                pays = await _sale_payments(client, sale)
+                rows.append({
+                    "sale_id":   str(sale.get("saleID")),
+                    "sellers":   _salespeople(items, set(), excl_ids, employees,
+                                              str(sale.get("employeeID", ""))),
+                    "profit":    _money(profit), "immediate": _money(immediate),
+                    "total":     _money(total),
+                    "payments":  [f"{p['type']} {_money(p['amount'])}" for p in pays],
+                    "is_PO_excluded": _is_po(pays, total),
+                    "has_own_row":    str(sale.get("saleID")) in on_sheet,
+                    "items":     [li["name"] for li in items],
+                })
+            out[tab] = rows
+        return {"window_days": days, "po_payment_types": PO_PAYMENT_TYPES, "ranking": out}
+    except ls.AuthExpired as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:
+        log.exception("debug-weekly failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
 @app.get("/debug-sale/{number}")
 async def debug_sale(number: str):
     """Full qualification trace for one sale (ticket number or saleID) —
@@ -1127,9 +1225,12 @@ async def debug_sale(number: str):
             "sale_total": _money(total),
         }
 
+        pays = await _sale_payments(client, sale)
         return {
             "sale_id":      sale_id,
             "ticket":       str(sale.get("ticketNumber", "")),
+            "payments":     [f"{p['type']} {_money(p['amount'])}" for p in pays],
+            "is_PO_(excluded_from_sales_of_the_week)": _is_po(pays, total),
             "would_add":    would_add,
             "added_because": ("camera/lens item" if camera_hit else
                               "over threshold" if over_threshold else "—"),

@@ -215,6 +215,20 @@ class LightspeedClient:
         data = await self.get("SaleLine.json", params={"saleID": sale_id, "limit": 100})
         return as_list(data.get("SaleLine"))
 
+    async def get_sale_payments(self, sale_id: str) -> list:
+        """Payments on a sale, with PaymentType loaded (used to spot sales
+        charged to a customer account — no money actually received)."""
+        try:
+            data = await self.get("SalePayment.json", params={
+                "saleID": sale_id, "limit": 100, "load_relations": '["PaymentType"]',
+            })
+            return as_list(data.get("SalePayment"))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise
+            log.warning(f"get_sale_payments({sale_id}): {exc}")
+            return []
+
     async def get_customer(self, customer_id: str) -> dict:
         for lr in ('["Contact"]', None):
             try:
