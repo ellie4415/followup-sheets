@@ -10,15 +10,15 @@
  * put the same SECRET value in env var MANAGER_SECRET.
  *
  * Columns: Date | Customer | Cashier | Items ("Seller — item" per line) |
- * Total Profit | Sale Total | Sale ID. Append-only; the app never edits
+ * Immediate Profit | Total Profit | Sale Total | Sale ID. Append-only; the app never edits
  * existing rows (the one-time fixColumns/flipItemLines migrations excepted).
  */
 
 const SECRET = 'PASTE_SECRET_HERE';
 
-const HEADERS = ['Date', 'Customer', 'Cashier', 'Items', 'Total Profit', 'Sale Total', 'Sale ID'];
+const HEADERS = ['Date', 'Customer', 'Cashier', 'Items', 'Immediate Profit', 'Total Profit', 'Sale Total', 'Sale ID'];
 const STORE_TABS = ['Reno', 'Rocklin'];
-const SALE_ID_COL = 7; // column G — moved when Sale Total got its own column (fixColumns)
+const SALE_ID_COL = 8; // column H — moved by addImmediateProfitColumn (v8); was G, before that F
 const CASHIER_COL = 3;
 const ITEMS_COL   = 4;
 
@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 7, existing: existing });
+  return json_({ ok: true, v: 8, existing: existing });
 }
 
 function doPost(e) {
@@ -227,6 +227,26 @@ function resetColors() {
   props.getKeys().forEach(function (k) {
     if (k.indexOf('empcolor:') === 0) props.deleteProperty(k);
   });
+}
+
+/**
+ * ONE-TIME migration (v8): insert the "Immediate Profit" column at E on
+ * every data tab (existing Total Profit values shift to F, Sale Total → G,
+ * Sale ID → H). Existing rows get a blank Immediate Profit — regenerate via
+ * clearAllDataRows + Re-import to fill it. Guarded; safe to run once.
+ */
+function addImmediateProfitColumn() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('cols_v3')) {
+    throw new Error('addImmediateProfitColumn already ran.');
+  }
+  const ss = SpreadsheetApp.getActive();
+  dataSheets_(ss).forEach(function (sh) {
+    if (String(sh.getRange(1, 5).getValue()) === 'Immediate Profit') return;
+    sh.insertColumnBefore(5);
+    sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+  });
+  props.setProperty('cols_v3', '1');
 }
 
 /**

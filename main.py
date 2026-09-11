@@ -512,18 +512,27 @@ async def run_job(trigger: str) -> dict:
                 cashier = employees.get(str(sale.get("employeeID", "")), "")
                 profit  = sum(_line_profit(li) for li in items
                               if li["cat_id"] not in excl_ids)
+                # "Immediate" = Lightspeed's own number (full discount hits
+                # profit); "Total" = after the vendor's recovery share.
+                immediate = sum(_line_profit(li, 0) for li in items
+                                if li["cat_id"] not in excl_ids)
                 # Profit/total as plain NUMBERS: the manager sheet is a Sheets
                 # Table with typed columns (Date / Currency), and "−$36.07"
                 # text (Unicode minus) can't be parsed into a Currency column.
-                mgr_rows.setdefault(ytab, []).append([
+                row = [
                     sale_date,
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
                     cashier,
                     _manager_items_text(items, employees, cashier),
-                    round(profit, 2),
-                    round(total, 2),
-                    str(sale_id),   # column G — the manager script's dedup column
-                ])
+                ]
+                # Script v8+ has the Immediate Profit column before Total
+                # Profit (Sale ID in H); older scripts read Sale ID from G, so
+                # keep the 7-wide layout for them — never let the app and the
+                # script disagree about the dedup column (Sept 10 lesson).
+                if manager.script_version() >= 8:
+                    row.append(round(immediate, 2))
+                row += [round(profit, 2), round(total, 2), str(sale_id)]   # Sale ID last = dedup column
+                mgr_rows.setdefault(ytab, []).append(row)
                 mgr_existing[ytab].add(str(sale_id))
 
             # ── Follow-up sheet (original rules: customer + email required) ──
@@ -665,7 +674,9 @@ async def weekly_job(trigger: str) -> dict:
             profit = sum(_line_profit(li) for li in items
                          if li["cat_id"] not in excl_ids)
             if profit > 0:
-                candidates[tab].append((profit, total, sale, items))
+                immediate = sum(_line_profit(li, 0) for li in items
+                                if li["cat_id"] not in excl_ids)
+                candidates[tab].append((profit, immediate, total, sale, items))
 
         for tab in sh.STORE_TABS:
             ytab = f"{tab} {week_end.year}"
@@ -674,7 +685,7 @@ async def weekly_job(trigger: str) -> dict:
                 continue
             ranked = sorted(candidates[tab], key=lambda c: c[0], reverse=True)[:TOP_SALES_PER_WEEK]
             lines = []
-            for rank, (profit, total, sale, items) in enumerate(ranked, start=1):
+            for rank, (profit, immediate, total, sale, items) in enumerate(ranked, start=1):
                 sellers = _salespeople(items, qual_ids, excl_ids, employees,
                                        str(sale.get("employeeID", ""))) or ["?"]
                 cust = {}
@@ -688,19 +699,19 @@ async def weekly_job(trigger: str) -> dict:
                 with_ = f" · with {', '.join(sellers[1:])}" if len(sellers) > 1 else ""
                 # Seller name FIRST so the bridge script colors it like any row.
                 lines.append(f"{sellers[0]} — #{rank}{with_} · {_money(profit)} profit "
-                             f"on {_money(total)} · {what} · {cname} · sale {sale.get('saleID')}")
+                             f"({_money(immediate)} immediate) on {_money(total)} · {what} "
+                             f"· {cname} · sale {sale.get('saleID')}")
             if not lines:
                 lines = ["No transactions with merchandise profit this week"]
             # A real date in the Date column (keeps the Table's column type
             # happy); the week label lives in the Customer cell.
+            blanks = 3 if manager.script_version() >= 8 else 2   # profit cols + Sale Total
             row = [
                 f"{week_end:%-m/%-d/%Y}",
                 f"SALES OF THE WEEK  {week_start:%-m/%-d}–{week_end:%-m/%-d}",
                 "",
                 "\n".join(lines),
-                "", "",
-                week_id,
-            ]
+            ] + [""] * blanks + [week_id]
             await manager.append_rows(ytab, [row])
             summary["added"][ytab] = len(ranked)
 

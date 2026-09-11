@@ -65,7 +65,9 @@ If both routes are configured, the Apps Script bridge wins.
 
 A separate spreadsheet for managers: every completed merchandise sale
 (walk-ins included, no email filter), columns Date | Customer | Cashier |
-Items — each item tagged with who sold it — | Total Profit | Sale ID.
+Items — each item tagged with who sold it — | Immediate Profit (Lightspeed's
+number) | Total Profit (after the vendor's discount recovery) | Sale Total |
+Sale ID.
 Setup mirrors the follow-up sheet: create a NEW blank spreadsheet (it holds
 profit data — share with managers only), paste
 [`docs/manager-bridge.gs`](docs/manager-bridge.gs) into its Apps Script with

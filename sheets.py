@@ -123,10 +123,13 @@ class BridgeSheets:
     async def ensure_setup(self) -> None:
         await self._get_state()   # doGet creates missing tabs/headers itself
 
+    def script_version(self) -> int:
+        return int(self._state.get("v") or 1)
+
     def supports_dynamic_tabs(self) -> bool:
         """v2+ scripts auto-create unknown tabs on append; a v1 script would
         SILENTLY drop rows for tabs it doesn't know."""
-        return int(self._state.get("v") or 1) >= 2
+        return self.script_version() >= 2
 
     async def read_settings(self) -> dict:
         return parse_settings(self._state.get("settings_raw", []))
@@ -209,6 +212,9 @@ class Sheets:
 
     def supports_dynamic_tabs(self) -> bool:
         return True
+
+    def script_version(self) -> int:
+        return 999   # REST backend has no script; every layout is fine
 
     async def all_sale_ids(self) -> dict:
         out = {}

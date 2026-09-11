@@ -30,9 +30,13 @@ The same poll feeds two spreadsheets:
    so the refund/zero-total gate sits AFTER the manager block. Walk-ins
    included, no email requirement. Columns: Date | Customer | Cashier |
    Items — grouped ONE LINE PER SELLER: "Name (net $): item, item (return)"
-   — | Total Profit (non-excluded lines: calcSubtotal − calcLineDiscount×(1−DISCOUNT_RECOVERY_PCT/100)
-   − avgCost×qty; FIFO fallback. At 0% recovery this equals Lightspeed's
-   Sales Listings profit to the cent; 80% is Ellie's vendor-recovery rule) | Sale ID (col F — that script's dedup column).
+   — | Immediate Profit (non-excluded lines: calcSubtotal − calcLineDiscount
+   − avgCost×qty; FIFO fallback — equals Lightspeed's Sales Listings profit
+   to the cent) | Total Profit (same but only (1−DISCOUNT_RECOVERY_PCT/100)
+   of the discount counts; 80% = Ellie's vendor-recovery rule) | Sale Total
+   | Sale ID (col H — that script's dedup column). The app checks
+   `script_version()` from doGet and writes the 7-wide pre-v8 layout to
+   older scripts so app and script never disagree about the dedup column.
 Both dedup by sale ID; the cursor advances only after BOTH sheets' appends
 succeed, so a failure on either retries the whole batch harmlessly.
 
