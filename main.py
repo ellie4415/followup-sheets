@@ -135,6 +135,38 @@ async def get_client() -> ls.LightspeedClient:
 
 # ── Sale fetching (sort=-saleID pagination; this account rejects timestamp filters) ──
 
+BULK_RELATIONS = '["SaleLines","SaleLines.Item","Customer","Customer.Contact"]'
+
+
+def _bulk_relations_ok() -> bool:
+    return store.get("bulk_relations", "yes") != "no"
+
+
+async def _lines_for(client: ls.LightspeedClient, sale: dict) -> list:
+    """Line items: embedded by the bulk fetch when available, else one call."""
+    emb = sale.get("SaleLines")
+    if isinstance(emb, dict):
+        lines = ls.as_list(emb.get("SaleLine"))
+        if lines or emb == {} or "SaleLine" in emb:
+            return lines
+    return await client.get_sale_lines(str(sale.get("saleID")))
+
+
+async def _customer_for(client: ls.LightspeedClient, sale: dict, cache: dict) -> dict:
+    """Customer (+Contact): embedded by the bulk fetch when available, else one
+    call, memoized per run."""
+    cid = str(sale.get("customerID") or "0")
+    if cid in ("", "0"):
+        return {}
+    emb = sale.get("Customer")
+    if isinstance(emb, dict) and emb.get("customerID"):
+        cache.setdefault(cid, emb)
+        return emb
+    if cid not in cache:
+        cache[cid] = await client.get_customer(cid)
+    return cache[cid]
+
+
 async def fetch_new_sales(client: ls.LightspeedClient, cursor: int,
                           window_days: int = 0) -> list:
     """All sales with saleID > cursor, oldest first. When there is no cursor
@@ -156,7 +188,23 @@ async def fetch_new_sales(client: ls.LightspeedClient, cursor: int,
             if url:
                 data = await client.get_url(url)
             else:
-                data = await client.get("Sale.json", params={"limit": 100, "sort": "-saleID"})
+                params = {"limit": 100, "sort": "-saleID"}
+                if _bulk_relations_ok():
+                    # Line items + customer embedded in the list response: one
+                    # request per 100 sales instead of 1-2 requests PER sale.
+                    # This is what turns a 30-minute re-import into ~2 minutes.
+                    params["load_relations"] = BULK_RELATIONS
+                try:
+                    data = await client.get("Sale.json", params=params)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 400 and "load_relations" in params:
+                        log.warning("Sale.json rejected load_relations — falling back "
+                                    "to per-sale fetches for this account")
+                        store.set("bulk_relations", "no")
+                        data = await client.get("Sale.json",
+                                                params={"limit": 100, "sort": "-saleID"})
+                    else:
+                        raise
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise ls.AuthExpired("Lightspeed authorization expired mid-run — visit /auth")
@@ -514,7 +562,7 @@ async def run_job(trigger: str) -> dict:
             customer_id  = str(sale.get("customerID") or "0")
             has_customer = customer_id not in ("", "0")
 
-            lines = await client.get_sale_lines(str(sale_id))
+            lines = await _lines_for(client, sale)
             items = _line_items(lines)
 
             camera_hit = any(li["qty"] > 0 and _is_camera_line(li, qual_ids, excl_ids)
@@ -544,9 +592,7 @@ async def run_job(trigger: str) -> dict:
 
             customer: dict = {}
             if has_customer and (mgr_candidate or (fu_candidate and total > 0)):
-                if customer_id not in customer_cache:
-                    customer_cache[customer_id] = await client.get_customer(customer_id)
-                customer = customer_cache[customer_id]
+                customer = await _customer_for(client, sale, customer_cache)
 
             if mgr_candidate:
                 c_first = (customer.get("firstName") or "").strip()
@@ -642,6 +688,7 @@ async def run_job(trigger: str) -> dict:
         # the sheet-side dedup makes the retry harmless.
         await flush(max_id)
         summary["watching_open_carts"] = len(pending_next)
+        summary["fetch_mode"] = "bulk (lines+customer embedded)" if _bulk_relations_ok() else "per-sale"
 
         summary["ok"] = True
         log.info(f"Run complete: +{summary['added']} skipped={skipped}")
@@ -701,7 +748,7 @@ async def weekly_job(trigger: str) -> dict:
             total = _fnum(sale.get("calcTotal"))
             if total <= 0:
                 continue   # refunds/exchanges are never the sale of the week
-            items  = _line_items(await client.get_sale_lines(str(sale.get("saleID"))))
+            items  = _line_items(await _lines_for(client, sale))
             profit = sum(_line_profit(li) for li in items
                          if li["cat_id"] not in excl_ids)
             if profit > 0:
@@ -719,10 +766,7 @@ async def weekly_job(trigger: str) -> dict:
             for rank, (profit, immediate, total, sale, items) in enumerate(ranked, start=1):
                 sellers = _salespeople(items, qual_ids, excl_ids, employees,
                                        str(sale.get("employeeID", ""))) or ["?"]
-                cust = {}
-                cid = str(sale.get("customerID") or "0")
-                if cid not in ("", "0"):
-                    cust = await client.get_customer(cid)
+                cust = await _customer_for(client, sale, {})
                 cname = f"{(cust.get('firstName') or '').strip()} {(cust.get('lastName') or '').strip()}".strip() or "Walk-in"
                 merch = [li["name"] for li in items if li["cat_id"] not in excl_ids] \
                         or [li["name"] for li in items]
