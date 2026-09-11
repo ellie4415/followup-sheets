@@ -49,6 +49,10 @@ SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
 MIN_CAMERA_PRICE = float(os.environ.get("MIN_CAMERA_PRICE", "100"))  # cheap disposables/novelty cameras don't qualify
+# Discounts: the store usually recovers ~80% of a discount from the vendor
+# (Ellie, Sept 2026), so only the unrecovered 20% counts against profit.
+# 0 = Lightspeed's own report math (full discount hits profit); 100 = ignore discounts.
+DISCOUNT_RECOVERY_PCT = float(os.environ.get("DISCOUNT_RECOVERY_PCT", "80"))
 WATCH_CART_HOURS = int(os.environ.get("WATCH_CART_HOURS", "72"))     # how long an open cart stays on the watch list
 WEEKLY_DAY       = int(os.environ.get("WEEKLY_DAY", "3"))            # 0=Mon … 3=Thu: sales-of-the-week night
 TOP_SALES_PER_WEEK = int(os.environ.get("TOP_SALES_PER_WEEK", "2"))
@@ -227,8 +231,7 @@ def _fnum(v) -> float:
 def _line_items(lines: list) -> list:
     """One dict per real line on the sale. employee_id is the LINE's employee
     — who actually sold the item — which can differ from whoever completed
-    the sale at the register. cost is the line's cost basis (FIFO, falling
-    back to average cost) scaled by quantity, for the manager sheet's profit
+    the sale at the register. cost is the line's cost basis (average cost, falling back to FIFO) scaled by quantity, for the manager sheet's profit
     column."""
     out = []
     for sl in lines:
@@ -244,7 +247,10 @@ def _line_items(lines: list) -> list:
             qty = 1
         fifo = _fnum(sl.get("fifoCost"))
         avg  = _fnum(sl.get("avgCost"))
-        unit_cost = fifo if fifo > 0 else avg
+        # AVERAGE cost first: it reproduces the Cost/Profit columns of
+        # Lightspeed's own Sales Listings report to the cent (verified on
+        # sale 101770, Sept 2026); FIFO is the fallback when avg is 0.
+        unit_cost = avg if avg > 0 else fifo
         out.append({
             "name":     name,
             "qty":      qty,
@@ -252,13 +258,9 @@ def _line_items(lines: list) -> list:
             "subtotal": _fnum(sl.get("calcSubtotal") or sl.get("displayableSubtotal")),
             "emp_id":   str(sl.get("employeeID") or ""),
             "cost":     unit_cost * qty,
+            "discount": _fnum(sl.get("calcLineDiscount")),   # signed like the line
             "fifo_raw": fifo,
             "avg_raw":  avg,
-            # Discount fields, raw — which one Lightspeed populates (line vs
-            # prorated sale-level) is being verified via /debug-sale.
-            "disc_raw": {k: sl.get(k) for k in ("calcLineDiscount", "discountAmount",
-                                                "discountPercent", "calcTotal")
-                         if sl.get(k) not in (None, "")},
         })
     return out
 
@@ -279,6 +281,14 @@ def _unit_price(li: dict) -> float:
     """Absolute per-unit price of a line (works for returns: -$1,150 ÷ -1 = $1,150)."""
     qty = abs(li["qty"]) or 1
     return abs(li["subtotal"]) / qty
+
+
+def _line_profit(li: dict, recovery_pct: float = None) -> float:
+    """subtotal − unrecovered discount − cost. calcSubtotal is PRE-discount
+    and calcLineDiscount is the line's discount (verified Sept 2026: at 0%
+    recovery this reproduces Lightspeed's Sales Listings profit exactly)."""
+    rec = DISCOUNT_RECOVERY_PCT if recovery_pct is None else recovery_pct
+    return li["subtotal"] - li["discount"] * (1 - rec / 100.0) - li["cost"]
 
 
 def _is_camera_line(li: dict, qual_ids: set, excl_ids: set) -> bool:
@@ -500,7 +510,7 @@ async def run_job(trigger: str) -> dict:
                 c_first = (customer.get("firstName") or "").strip()
                 c_last  = (customer.get("lastName") or "").strip()
                 cashier = employees.get(str(sale.get("employeeID", "")), "")
-                profit  = sum(li["subtotal"] - li["cost"] for li in items
+                profit  = sum(_line_profit(li) for li in items
                               if li["cat_id"] not in excl_ids)
                 # Profit/total as plain NUMBERS: the manager sheet is a Sheets
                 # Table with typed columns (Date / Currency), and "−$36.07"
@@ -652,7 +662,7 @@ async def weekly_job(trigger: str) -> dict:
             if total <= 0:
                 continue   # refunds/exchanges are never the sale of the week
             items  = _line_items(await client.get_sale_lines(str(sale.get("saleID"))))
-            profit = sum(li["subtotal"] - li["cost"] for li in items
+            profit = sum(_line_profit(li) for li in items
                          if li["cat_id"] not in excl_ids)
             if profit > 0:
                 candidates[tab].append((profit, total, sale, items))
@@ -962,8 +972,9 @@ async def debug_sale(number: str):
                 "counts_toward_threshold": not excluded,
                 "cost_basis":      {"fifoCost": li["fifo_raw"], "avgCost": li["avg_raw"],
                                     "cost_used": round(li["cost"], 2)},
-                "discount_raw":    li["disc_raw"],
-                "profit":          round(li["subtotal"] - li["cost"], 2),
+                "discount":        li["discount"],
+                "profit_lightspeed_style": round(_line_profit(li, 0), 2),
+                "profit":          round(_line_profit(li), 2),
             })
 
         camera_hit = any(l["qualifying_item"] for l in line_report)
@@ -978,10 +989,8 @@ async def debug_sale(number: str):
             "shop_recognized":      bool(_store_tab(shop_name)),
             "shop_not_skipped":     shop_name.strip().lower() not in settings["skip_shops"],
             "sale_total":           total,
-            "sale_discount_raw":    {k: sale.get(k) for k in ("calcDiscount", "discountAmount",
-                                                             "discountPercent", "calcSubtotal",
-                                                             "calcFees", "calcNonTaxable")
-                                     if sale.get(k) not in (None, "")},
+            "sale_discount":        _fnum(sale.get("calcDiscount")),
+            "discount_recovery_pct": DISCOUNT_RECOVERY_PCT,
             "total_positive":       total > 0,
             "has_customer":         str(sale.get("customerID") or "0") not in ("", "0"),
             "camera_or_lens_item":  camera_hit,
@@ -999,7 +1008,7 @@ async def debug_sale(number: str):
         cashier       = employees.get(str(sale.get("employeeID", "")), "")
         mgr_camera    = any(_is_camera_line(li, qual_ids, excl_ids) for li in items)
         mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
-        mgr_profit    = sum(li["subtotal"] - li["cost"] for li in items
+        mgr_profit    = sum(_line_profit(li) for li in items
                             if li["cat_id"] not in excl_ids)
         manager_view = {
             "configured": _make_manager_sheets() is not None,
@@ -1012,6 +1021,8 @@ async def debug_sale(number: str):
             "items_lines":
                 _manager_items_text(items, employees, cashier).split("\n"),
             "total_profit": _money(mgr_profit),
+            "total_profit_lightspeed_style": _money(sum(_line_profit(li, 0) for li in items
+                                                        if li["cat_id"] not in excl_ids)),
             "sale_total": _money(total),
         }
 
