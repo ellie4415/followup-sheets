@@ -47,8 +47,13 @@ ranks per store by merchandise profit (same definition as Total Profit —
 lab/service lines have no cost data and would win on phantom profit),
 skips refunds/exchanges, and appends ONE marker row per store tab:
 Date "Week M/D–M/D/YYYY", Customer "SALES OF THE WEEK", Items = top
-TOP_SALES_PER_WEEK lines ("Seller — #1 · $profit on $total · items ·
-customer · sale N" — seller first so the script colors it), Sale ID
+TOP_SALES_PER_WEEK entries, seller first so the script colors it. A sale
+that already has its own row on the sheet gets ONE line ("Seller — #1 ·
+$profit ($immediate immediate) · sale N (see its row)"); a sale that did
+NOT qualify for a row (no camera/lens, under threshold) gets the summary
+line plus its FULL item list indented beneath in the normal "Seller —
+Item" format (Ellie: the weekly row is the only place those items
+appear). Sale ID
 "WEEK-YYYY-MM-DD" (the idempotency sentinel — never a real sale ID). The
 bridge script (v6) paints WEEK- rows gold+bold and gives every calendar
 month its OWN Date-cell fill (12-entry MONTH_TINTS) so Sheets'
