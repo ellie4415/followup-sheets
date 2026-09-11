@@ -758,7 +758,8 @@ async def weekly_job(trigger: str) -> dict:
 
         for tab in sh.STORE_TABS:
             ytab = f"{tab} {week_end.year}"
-            if week_id in await manager.existing_sale_ids(ytab):
+            on_sheet = await manager.existing_sale_ids(ytab)
+            if week_id in on_sheet:
                 summary["added"][ytab] = "already posted"
                 continue
             ranked = sorted(candidates[tab], key=lambda c: c[0], reverse=True)[:TOP_SALES_PER_WEEK]
@@ -768,14 +769,22 @@ async def weekly_job(trigger: str) -> dict:
                                        str(sale.get("employeeID", ""))) or ["?"]
                 cust = await _customer_for(client, sale, {})
                 cname = f"{(cust.get('firstName') or '').strip()} {(cust.get('lastName') or '').strip()}".strip() or "Walk-in"
-                merch = [li["name"] for li in items if li["cat_id"] not in excl_ids] \
-                        or [li["name"] for li in items]
-                what  = ", ".join(merch[:3]) + (" …" if len(merch) > 3 else "")
+                sid   = str(sale.get("saleID"))
                 with_ = f" · with {', '.join(sellers[1:])}" if len(sellers) > 1 else ""
                 # Seller name FIRST so the bridge script colors it like any row.
-                lines.append(f"{sellers[0]} — #{rank}{with_} · {_money(profit)} profit "
-                             f"({_money(immediate)} immediate) on {_money(total)} · {what} "
-                             f"· {cname} · sale {sale.get('saleID')}")
+                head  = (f"{sellers[0]} — #{rank}{with_} · {_money(profit)} profit "
+                         f"({_money(immediate)} immediate)")
+                if sid in on_sheet:
+                    # It qualified for its own row: point at it, keep this short.
+                    lines.append(f"{head} · sale {sid} (see its row)")
+                else:
+                    # No camera/lens and under the threshold, so the sheet has
+                    # no row for it — this is the only place its items appear.
+                    cashier = employees.get(str(sale.get("employeeID", "")), "")
+                    lines.append(f"{head} on {_money(total)} · {cname} · sale {sid} "
+                                 "(not on sheet — all items:)")
+                    lines.append("\n".join("    " + ln for ln in
+                                           _manager_items_text(items, employees, cashier).split("\n")))
             if not lines:
                 lines = ["No transactions with merchandise profit this week"]
             # A real date in the Date column (keeps the Table's column type
