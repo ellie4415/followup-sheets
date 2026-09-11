@@ -93,5 +93,6 @@ created automatically on the first sale of the new year.
 | `RUN_HOURS_START` / `RUN_HOURS_END` | Hourly-sync window, Pacific hours (default 8–20) |
 | `WATCH_CART_HOURS` | How long an open register cart stays on the re-check list (default 72) |
 | `WEEKLY_DAY` / `TOP_SALES_PER_WEEK` | Sales-of-the-week day (0=Mon, default 3=Thu) and how many to list (default 2) |
+| `DISCOUNT_RECOVERY_PCT` | Share of a discount the vendor reimburses; only the rest counts against profit (default 80; 0 = Lightspeed's report math) |
 | `MIN_CAMERA_PRICE` | Camera/lens items under this per-unit price don't qualify a sale (default 100) |
 | `LOOKBACK_DAYS` | History window for the very first run (default 7) |
