@@ -48,6 +48,12 @@ WEBAPP_URL    = os.environ.get("SHEETS_WEBAPP_URL", "")   # Apps Script bridge (
 SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
+# Values pasted into Railway sometimes carry a trailing space/newline — which
+# makes a correct-looking secret fail as "bad secret". Strip them all.
+CLIENT_ID, CLIENT_SECRET, SHEET_ID, WEBAPP_URL, SHEETS_SECRET, MANAGER_WEBAPP_URL, MANAGER_SECRET = (
+    v.strip() for v in (CLIENT_ID, CLIENT_SECRET, SHEET_ID, WEBAPP_URL, SHEETS_SECRET,
+                        MANAGER_WEBAPP_URL, MANAGER_SECRET))
+CHECKPOINT_EVERY = 150   # sales processed between progress checkpoints (see run_job)
 MIN_CAMERA_PRICE = float(os.environ.get("MIN_CAMERA_PRICE", "100"))  # cheap disposables/novelty cameras don't qualify
 # Discounts: the store usually recovers ~80% of a discount from the vendor
 # (Ellie, Sept 2026), so only the unrecovered 20% counts against profit.
@@ -138,6 +144,7 @@ async def fetch_new_sales(client: ls.LightspeedClient, cursor: int,
     if window_days or cursor <= 0:
         cursor = 0
         days = window_days or int(store.get("reimport_days") or 0) or LOOKBACK_DAYS
+        store.set("reimport_days", "")   # one-shot: consumed now, not on success
         since = datetime.now(tz=PACIFIC) - timedelta(days=days)
         since_str = since.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         log.info(f"Lookback window: {days} days (since {since_str})")
@@ -437,9 +444,44 @@ async def run_job(trigger: str) -> dict:
         rows_by_tab: dict = {t: [] for t in sh.STORE_TABS}
         customer_cache: dict = {}
         max_id = cursor
+        cursor_now = cursor
 
+        async def flush(upto: int) -> None:
+            """Checkpoint: append everything buffered so far to both sheets,
+            advance the cursor to the last FULLY processed sale, persist the
+            watch list. A run that dies later resumes from here instead of
+            starting over — an aborted big re-import used to leave cursor=0
+            and every hourly run re-attempted (and re-aborted) the whole
+            window: the lab-sync July 3 rescan loop, recreated Sept 11."""
+            nonlocal cursor_now
+            for tab, rows in list(rows_by_tab.items()):
+                if rows:
+                    await sheet.append_rows(tab, rows)
+                    summary["added"][tab] = summary["added"].get(tab, 0) + len(rows)
+                    rows_by_tab[tab] = []
+            if manager is not None:
+                for ytab, rows in list(mgr_rows.items()):
+                    if rows:
+                        await manager.append_rows(ytab, rows)
+                        key = f"{ytab} (manager)"
+                        summary["added"][key] = summary["added"].get(key, 0) + len(rows)
+                        mgr_rows[ytab] = []
+            if upto > cursor_now:
+                store.set("cursor", str(upto))
+                cursor_now = upto
+            store.set_json("pending_carts", pending_next[-500:])
+
+        processed = 0
+        last_done_id = cursor
         for sale in sales:
             sale_id = int(sale.get("saleID") or 0)
+            # Checkpoint BEFORE touching this sale, with the cursor at the
+            # previous sale — never past a sale that isn't fully processed.
+            if processed and processed % CHECKPOINT_EVERY == 0:
+                await flush(last_done_id)
+                log.info(f"Checkpoint at sale {last_done_id} ({processed} processed)")
+            processed += 1
+            last_done_id = sale_id
             max_id  = max(max_id, sale_id)
 
             if str(sale.get("completed")) != "true":
@@ -595,21 +637,10 @@ async def run_job(trigger: str) -> dict:
                 if w not in summary.setdefault("warnings", []):
                     summary["warnings"].append(w)
 
-        for tab, rows in rows_by_tab.items():
-            await sheet.append_rows(tab, rows)
-            summary["added"][tab] = len(rows)
-        if manager is not None:
-            for ytab, rows in mgr_rows.items():
-                await manager.append_rows(ytab, rows)
-                summary["added"][f"{ytab} (manager)"] = len(rows)
-
-        # Advance the cursor only after every append succeeded — a Sheets
-        # failure means the whole batch is retried next run (the sheet-side
-        # dedup makes retries harmless).
-        if max_id > cursor:
-            store.set("cursor", str(max_id))
-        store.set("reimport_days", "")   # one-shot override, consumed
-        store.set_json("pending_carts", pending_next[-500:])
+        # Final checkpoint: appends whatever is left, cursor to the batch max.
+        # A Sheets failure here leaves the cursor at the last good checkpoint;
+        # the sheet-side dedup makes the retry harmless.
+        await flush(max_id)
         summary["watching_open_carts"] = len(pending_next)
 
         summary["ok"] = True
@@ -735,15 +766,21 @@ async def _guarded(fn, trigger: str, key: str = "last_run") -> None:
         try:
             # Hard deadline — a hung run must never wedge the scheduler
             # (lab-sync July 3 lesson: everything inside a lock gets a timeout).
-            await asyncio.wait_for(fn(trigger), timeout=1800)
+            # Big scans (re-imports, the weekly ranking, a run starting from
+            # cursor 0) legitimately take a while; incremental runs don't.
+            big = (trigger == "re-import" or key == "last_weekly"
+                   or int(store.get("cursor") or 0) == 0)
+            limit = 3 * 3600 if big else 1800
+            await asyncio.wait_for(fn(trigger), timeout=limit)
         except asyncio.TimeoutError:
             store.set_json(key, {
                 "started": datetime.now(tz=PACIFIC).strftime("%-m/%-d/%Y %-I:%M %p"),
                 "trigger": trigger, "ok": False,
                 "added": {t: 0 for t in sh.STORE_TABS}, "skipped": {},
-                "error": "Run exceeded the 30-minute deadline and was aborted",
+                "error": f"Run exceeded the {limit // 60}-minute deadline and was aborted "
+                         "(progress up to the last checkpoint is kept)",
             })
-            log.error("Run aborted at 30-minute deadline")
+            log.error(f"Run aborted at {limit // 60}-minute deadline")
         finally:
             _job_running = False
 
