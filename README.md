@@ -91,6 +91,7 @@ created automatically on the first sale of the new year.
 | `GOOGLE_SERVICE_ACCOUNT_JSON` / `SHEET_ID` | Service-account fallback route |
 | `DATA_DIR` | Volume mount path (`/data` on Railway) |
 | `RUN_HOURS_START` / `RUN_HOURS_END` | Hourly-sync window, Pacific hours (default 8–20) |
+| `WATCH_CART_HOURS` | How long an open register cart stays on the re-check list (default 72) |
 | `WEEKLY_DAY` / `TOP_SALES_PER_WEEK` | Sales-of-the-week day (0=Mon, default 3=Thu) and how many to list (default 2) |
 | `MIN_CAMERA_PRICE` | Camera/lens items under this per-unit price don't qualify a sale (default 100) |
 | `LOOKBACK_DAYS` | History window for the very first run (default 7) |

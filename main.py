@@ -49,6 +49,7 @@ SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
 MIN_CAMERA_PRICE = float(os.environ.get("MIN_CAMERA_PRICE", "100"))  # cheap disposables/novelty cameras don't qualify
+WATCH_CART_HOURS = int(os.environ.get("WATCH_CART_HOURS", "72"))     # how long an open cart stays on the watch list
 WEEKLY_DAY       = int(os.environ.get("WEEKLY_DAY", "3"))            # 0=Mon … 3=Thu: sales-of-the-week night
 TOP_SALES_PER_WEEK = int(os.environ.get("TOP_SALES_PER_WEEK", "2"))
 RUN_HOURS_START = int(os.environ.get("RUN_HOURS_START", "8"))   # first hourly run (Pacific)
@@ -381,13 +382,11 @@ async def run_job(trigger: str) -> dict:
         batch_ids  = {str(s.get("saleID") or "") for s in sales}
         prior      = store.get_json("pending_carts", []) or []
         first_seen = {str(p.get("id")): float(p.get("first_seen") or now) for p in prior}
-        # With hourly runs, re-fetching ~500 mostly-abandoned carts every hour
-        # would be waste: hourly runs re-check only YOUNG carts (<48h — the
-        # ones that actually complete, e.g. same-day pickups); the full sweep
-        # of older carts happens once a day (>20h since the last one) and on
-        # re-imports.
-        full_check = (trigger == "re-import"
-                      or now - float(store.get("pending_full_check") or 0) > 20 * 3600)
+        # Carts that don't complete within a couple of days basically never
+        # do (Ellie, Sept 2026 — Lightspeed leaves abandoned carts open
+        # forever). The real losses were same-day / next-day completions, so
+        # a short window (WATCH_CART_HOURS, default 72 — covers a weekend)
+        # catches those while keeping the list to a few dozen carts.
         pending_next: list = []
         recheck_ids: set = set()   # carts already on the watch list — a re-check
                                    # that's STILL open is not a new "skip"
@@ -395,13 +394,8 @@ async def run_job(trigger: str) -> dict:
             pid = str(p.get("id") or "")
             if not pid or pid in batch_ids:
                 continue
-            age = now - first_seen[pid]
-            if age > 45 * 86400:
-                log.info(f"Dropping open cart {pid} from the watch list (>45 days old)")
-                continue
-            if not full_check and age > 48 * 3600:
-                pending_next.append(p)   # old cart — the daily sweep handles it
-                continue
+            if now - first_seen[pid] > WATCH_CART_HOURS * 3600:
+                continue   # abandoned — stop watching
             try:
                 data = await client.get(f"Sale/{pid}.json")
                 s = data.get("Sale")
@@ -589,8 +583,6 @@ async def run_job(trigger: str) -> dict:
             store.set("cursor", str(max_id))
         store.set("reimport_days", "")   # one-shot override, consumed
         store.set_json("pending_carts", pending_next[-500:])
-        if full_check:
-            store.set("pending_full_check", str(now))
         summary["watching_open_carts"] = len(pending_next)
 
         summary["ok"] = True
