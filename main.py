@@ -497,13 +497,16 @@ async def run_job(trigger: str) -> dict:
                 cashier = employees.get(str(sale.get("employeeID", "")), "")
                 profit  = sum(li["subtotal"] - li["cost"] for li in items
                               if li["cat_id"] not in excl_ids)
+                # Profit/total as plain NUMBERS: the manager sheet is a Sheets
+                # Table with typed columns (Date / Currency), and "−$36.07"
+                # text (Unicode minus) can't be parsed into a Currency column.
                 mgr_rows.setdefault(ytab, []).append([
                     sale_date,
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
                     cashier,
                     _manager_items_text(items, employees, cashier),
-                    _money(profit),
-                    _money(total),
+                    round(profit, 2),
+                    round(total, 2),
                     str(sale_id),   # column G — the manager script's dedup column
                 ])
                 mgr_existing[ytab].add(str(sale_id))
@@ -673,9 +676,11 @@ async def weekly_job(trigger: str) -> dict:
                              f"on {_money(total)} · {what} · {cname} · sale {sale.get('saleID')}")
             if not lines:
                 lines = ["No transactions with merchandise profit this week"]
+            # A real date in the Date column (keeps the Table's column type
+            # happy); the week label lives in the Customer cell.
             row = [
-                f"Week {week_start:%-m/%-d}–{week_end:%-m/%-d/%Y}",
-                "SALES OF THE WEEK",
+                f"{week_end:%-m/%-d/%Y}",
+                f"SALES OF THE WEEK  {week_start:%-m/%-d}–{week_end:%-m/%-d}",
                 "",
                 "\n".join(lines),
                 "", "",

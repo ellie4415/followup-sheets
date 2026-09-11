@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 6, existing: existing });
+  return json_({ ok: true, v: 7, existing: existing });
 }
 
 function doPost(e) {
@@ -82,11 +82,14 @@ function doPost(e) {
           .setFontWeight('bold');
         sh.setFrozenRows(1);
       }
-      // Append after the last row that has a Sale ID — not getLastRow(),
-      // which counts stray content/validation below the data.
-      const start = lastDataRow_(sh) + 1;
-      const overflow = start + a.rows.length - 1 - sh.getMaxRows();
-      if (overflow > 0) sh.insertRowsAfter(sh.getMaxRows(), overflow);
+      // INSERT rows directly after the last row that has a Sale ID (not
+      // getLastRow(), which counts stray content below the data). Inserting
+      // inside the existing data block keeps the tab's Sheets *Table*
+      // growing — the new rows join it and inherit its column types and
+      // formatting — instead of piling plain rows underneath it.
+      const anchor = lastDataRow_(sh);
+      sh.insertRowsAfter(anchor, a.rows.length);
+      const start = anchor + 1;
       sh.getRange(start, 1, a.rows.length, a.rows[0].length)
         .setValues(a.rows);
       for (let i = 0; i < a.rows.length; i++) {
@@ -127,8 +130,20 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
     sh.getRange(rowIdx, 1, 1, HEADERS.length).setBackground(WEEK_ROW_BG);
     sh.getRange(rowIdx, 1, 1, 2).setFontWeight('bold');
   } else if (dateText) {
-    const m = dateText.match(/^(\d{1,2})\/\d{1,2}\/\d{4}/);
-    if (m) sh.getRange(rowIdx, 1).setBackground(MONTH_TINTS[(parseInt(m[1], 10) - 1) % 12]);
+    // dateText is "M/D/YYYY" from the app, or the cell's DISPLAY value when
+    // restyling (the cell itself holds a real Date, so getValue() would give
+    // a Date object — that's why an earlier recolorAll skipped the months).
+    let month = 0;
+    const m = String(dateText).match(/^(\d{1,2})\/\d{1,2}\/\d{4}/);
+    if (m) {
+      month = parseInt(m[1], 10);
+    } else {
+      const d = new Date(dateText);
+      if (!isNaN(d.getTime())) month = d.getMonth() + 1;
+    }
+    if (month >= 1 && month <= 12) {
+      sh.getRange(rowIdx, 1).setBackground(MONTH_TINTS[month - 1]);
+    }
   }
   // Items cell ("Name — item" per line): item text stays BLACK; only the
   // employee name BEFORE the first " — " takes that employee's color (bold).
@@ -275,7 +290,7 @@ function flipItemLines() {
       cell.setValue(flipped);
       colorizeRow_(sh, r, flipped,
                    String(sh.getRange(r, CASHIER_COL).getValue() || ''),
-                   String(sh.getRange(r, 1).getValue() || ''),
+                   sh.getRange(r, 1).getDisplayValue(),
                    String(sh.getRange(r, SALE_ID_COL).getValue() || ''));
     }
   });
@@ -295,7 +310,7 @@ function recolorAll() {
       colorizeRow_(sh, r,
                    String(sh.getRange(r, ITEMS_COL).getValue() || ''),
                    String(sh.getRange(r, CASHIER_COL).getValue() || ''),
-                   String(sh.getRange(r, 1).getValue() || ''),
+                   sh.getRange(r, 1).getDisplayValue(),
                    String(sh.getRange(r, SALE_ID_COL).getValue() || ''));
     }
   });
