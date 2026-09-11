@@ -199,6 +199,14 @@ def _make_manager_sheets():
     return None
 
 
+def _year_tab(tab: str, date_str: str) -> str:
+    """Manager-sheet tab per store per YEAR ('Reno 2026'), decided by the
+    sale's own date so the January rollover needs no human action."""
+    year = date_str.split("/")[-1] if date_str and date_str.count("/") == 2 \
+        else str(datetime.now(tz=PACIFIC).year)
+    return f"{tab} {year}"
+
+
 def _store_tab(shop_name: str) -> str:
     n = (shop_name or "").lower()
     if "reno" in n:
@@ -412,12 +420,10 @@ async def run_job(trigger: str) -> dict:
             existing[tab] = await sheet.existing_sale_ids(tab)
 
         manager = _make_manager_sheets()
-        mgr_rows: dict = {t: [] for t in sh.STORE_TABS}
-        mgr_existing: dict = {}
+        mgr_rows: dict = {}        # year tab ('Reno 2026') -> rows
+        mgr_existing: dict = {}    # year tab -> sale IDs already there (fetched lazily)
         if manager is not None:
             await manager.ensure_setup()
-            for tab in sh.STORE_TABS:
-                mgr_existing[tab] = await manager.existing_sale_ids(tab)
 
         rows_by_tab: dict = {t: [] for t in sh.STORE_TABS}
         customer_cache: dict = {}
@@ -477,9 +483,13 @@ async def run_job(trigger: str) -> dict:
             # seller. Walk-ins included, no email requirement.
             mgr_camera    = any(_is_camera_line(li, qual_ids, excl_ids) for li in items)
             mgr_threshold = threshold > 0 and abs(qualifying_total) >= threshold
-            mgr_candidate = (manager is not None
-                             and str(sale_id) not in mgr_existing[tab]
-                             and (mgr_camera or mgr_threshold))
+            sale_date     = ls.format_date(sale.get("timeStamp", ""))
+            ytab          = _year_tab(tab, sale_date)
+            mgr_candidate = manager is not None and (mgr_camera or mgr_threshold)
+            if mgr_candidate:
+                if ytab not in mgr_existing:
+                    mgr_existing[ytab] = await manager.existing_sale_ids(ytab)
+                mgr_candidate = str(sale_id) not in mgr_existing[ytab]
 
             customer: dict = {}
             if has_customer and (mgr_candidate or (fu_candidate and total > 0)):
@@ -493,8 +503,8 @@ async def run_job(trigger: str) -> dict:
                 cashier = employees.get(str(sale.get("employeeID", "")), "")
                 profit  = sum(li["subtotal"] - li["cost"] for li in items
                               if li["cat_id"] not in excl_ids)
-                mgr_rows[tab].append([
-                    ls.format_date(sale.get("timeStamp", "")),
+                mgr_rows.setdefault(ytab, []).append([
+                    sale_date,
                     f"{c_first} {c_last}".strip() or "(Walk-in)",
                     cashier,
                     _manager_items_text(items, employees, cashier),
@@ -502,7 +512,7 @@ async def run_job(trigger: str) -> dict:
                     _money(total),
                     str(sale_id),   # column G — the manager script's dedup column
                 ])
-                mgr_existing[tab].add(str(sale_id))
+                mgr_existing[ytab].add(str(sale_id))
 
             # ── Follow-up sheet (original rules: customer + email required) ──
             if total <= 0:
@@ -568,9 +578,9 @@ async def run_job(trigger: str) -> dict:
             await sheet.append_rows(tab, rows)
             summary["added"][tab] = len(rows)
         if manager is not None:
-            for tab in sh.STORE_TABS:
-                await manager.append_rows(tab, mgr_rows[tab])
-                summary["added"][f"{tab} (manager)"] = len(mgr_rows[tab])
+            for ytab, rows in mgr_rows.items():
+                await manager.append_rows(ytab, rows)
+                summary["added"][f"{ytab} (manager)"] = len(rows)
 
         # Advance the cursor only after every append succeeded — a Sheets
         # failure means the whole batch is retried next run (the sheet-side
@@ -648,8 +658,9 @@ async def weekly_job(trigger: str) -> dict:
                 candidates[tab].append((profit, total, sale, items))
 
         for tab in sh.STORE_TABS:
-            if week_id in await manager.existing_sale_ids(tab):
-                summary["added"][tab] = "already posted"
+            ytab = f"{tab} {week_end.year}"
+            if week_id in await manager.existing_sale_ids(ytab):
+                summary["added"][ytab] = "already posted"
                 continue
             ranked = sorted(candidates[tab], key=lambda c: c[0], reverse=True)[:TOP_SALES_PER_WEEK]
             lines = []
@@ -678,8 +689,8 @@ async def weekly_job(trigger: str) -> dict:
                 "", "",
                 week_id,
             ]
-            await manager.append_rows(tab, [row])
-            summary["added"][tab] = len(ranked)
+            await manager.append_rows(ytab, [row])
+            summary["added"][ytab] = len(ranked)
 
         summary["ok"] = True
         log.info(f"Sales of the week posted: {summary['added']}")

@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 5, existing: existing });
+  return json_({ ok: true, v: 6, existing: existing });
 }
 
 function doPost(e) {
@@ -103,9 +103,22 @@ function doPost(e) {
   return json_({ ok: true });
 }
 
-// Month separation: the Date cell alternates tint by calendar month so a
-// month boundary is visible at a glance while scrolling.
-const MONTH_TINTS = ['#e3f2fd', '#fff8e1'];   // even months, odd months
+// Month separation: every calendar month has its OWN Date-cell fill, so
+// Data → Create a filter → "Filter by color" isolates a month in one click.
+const MONTH_TINTS = [
+  '#cfe2ff', // Jan  blue
+  '#ffd6e7', // Feb  pink
+  '#d3f5d6', // Mar  mint
+  '#fff2b3', // Apr  yellow
+  '#e5d9ff', // May  lavender
+  '#ffdfc2', // Jun  peach
+  '#c9f2f0', // Jul  aqua
+  '#e9d5c3', // Aug  tan
+  '#ffcccb', // Sep  salmon
+  '#f0c9f5', // Oct  orchid
+  '#d9dde6', // Nov  slate
+  '#dcedc8', // Dec  lime
+];
 const WEEK_ROW_BG = '#fff2cc';                // Sales of the Week marker rows
 
 function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
@@ -115,7 +128,7 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
     sh.getRange(rowIdx, 1, 1, 2).setFontWeight('bold');
   } else if (dateText) {
     const m = dateText.match(/^(\d{1,2})\/\d{1,2}\/\d{4}/);
-    if (m) sh.getRange(rowIdx, 1).setBackground(MONTH_TINTS[parseInt(m[1], 10) % 2]);
+    if (m) sh.getRange(rowIdx, 1).setBackground(MONTH_TINTS[(parseInt(m[1], 10) - 1) % 12]);
   }
   // Items cell ("Name — item" per line): item text stays BLACK; only the
   // employee name BEFORE the first " — " takes that employee's color (bold).
@@ -159,9 +172,7 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
  */
 function clearAllDataRows() {
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tabName) {
-    const sh = ss.getSheetByName(tabName);
-    if (!sh) return;
+  dataSheets_(ss).forEach(function (sh) {
     const last = sh.getLastRow();
     if (last >= 2) {
       sh.getRange(2, 1, last - 1, sh.getMaxColumns()).clearContent().setBackground(null);
@@ -175,9 +186,7 @@ function clearAllDataRows() {
  */
 function removeDuplicateRows() {
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tabName) {
-    const sh = ss.getSheetByName(tabName);
-    if (!sh) return;
+  dataSheets_(ss).forEach(function (sh) {
     const last = sh.getLastRow();
     if (last < 3) return;
     const ids = sh.getRange(2, SALE_ID_COL, last - 1, 1).getValues();
@@ -217,9 +226,7 @@ function fixColumns() {
     throw new Error('fixColumns already ran — the columns are already migrated.');
   }
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tabName) {
-    const sh = ss.getSheetByName(tabName);
-    if (!sh) return;
+  dataSheets_(ss).forEach(function (sh) {
     sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
     const last = sh.getLastRow();
     for (let r = 2; r <= last; r++) {
@@ -254,9 +261,7 @@ function flipItemLines() {
     throw new Error('flipItemLines already ran — running again would swap lines back to Item — Name.');
   }
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tabName) {
-    const sh = ss.getSheetByName(tabName);
-    if (!sh) return;
+  dataSheets_(ss).forEach(function (sh) {
     const last = lastDataRow_(sh);
     for (let r = 2; r <= last; r++) {
       const cell = sh.getRange(r, ITEMS_COL);
@@ -284,9 +289,7 @@ function flipItemLines() {
  */
 function recolorAll() {
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tabName) {
-    const sh = ss.getSheetByName(tabName);
-    if (!sh) return;
+  dataSheets_(ss).forEach(function (sh) {
     const last = lastDataRow_(sh);
     for (let r = 2; r <= last; r++) {
       colorizeRow_(sh, r,
@@ -309,15 +312,35 @@ function lastDataRow_(sh) {
   return lastData;
 }
 
+// One tab per store per YEAR ("Reno 2026"). The app picks the tab from each
+// sale's date, so the January rollover is automatic (doPost creates unknown
+// tabs). ensureSetup_ makes the current year's tabs exist — RENAMING a
+// legacy un-yeared "Reno"/"Rocklin" tab into place the first time, so the
+// original data carries over with no manual migration.
 function ensureSetup_() {
   const ss = SpreadsheetApp.getActive();
-  STORE_TABS.forEach(function (tab) {
-    if (!ss.getSheetByName(tab)) {
-      const sh = ss.insertSheet(tab);
-      sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
-        .setFontWeight('bold');
-      sh.setFrozenRows(1);
+  const year = new Date().getFullYear();
+  STORE_TABS.forEach(function (base) {
+    const yearName = base + ' ' + year;
+    if (ss.getSheetByName(yearName)) return;
+    const legacy = ss.getSheetByName(base);
+    if (legacy) {
+      legacy.setName(yearName);
+      return;
     }
+    const sh = ss.insertSheet(yearName);
+    sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
+      .setFontWeight('bold');
+    sh.setFrozenRows(1);
+  });
+}
+
+// Every data tab: "Reno", "Reno 2026", "Rocklin 2027", … (any tab whose
+// name starts with a store name). Used by all the maintenance helpers.
+function dataSheets_(ss) {
+  return ss.getSheets().filter(function (sh) {
+    const n = sh.getName();
+    return STORE_TABS.some(function (base) { return n.indexOf(base) === 0; });
   });
 }
 

@@ -45,8 +45,17 @@ Date "Week M/D–M/D/YYYY", Customer "SALES OF THE WEEK", Items = top
 TOP_SALES_PER_WEEK lines ("Seller — #1 · $profit on $total · items ·
 customer · sale N" — seller first so the script colors it), Sale ID
 "WEEK-YYYY-MM-DD" (the idempotency sentinel — never a real sale ID). The
-bridge script (v5) paints WEEK- rows gold+bold and tints normal rows' Date
-cell by month parity (MONTH_TINTS) — that's the month divider.
+bridge script (v6) paints WEEK- rows gold+bold and gives every calendar
+month its OWN Date-cell fill (12-entry MONTH_TINTS) so Sheets'
+"Filter by color" isolates a month.
+
+**Manager tabs are per store per YEAR** ("Reno 2026") — `_year_tab()` picks
+the tab from the sale's own date (weekly rows use the week-end year), so
+January rolls over with no human action; doPost auto-creates unknown tabs
+and `ensureSetup_` renames a legacy un-yeared "Reno"/"Rocklin" tab into
+the current year's name once. Manager dedup is fetched lazily per year
+tab. The script's maintenance helpers iterate `dataSheets_()` (every tab
+whose name starts with a store name).
 
 ## Qualification rule (the follow-up product)
 

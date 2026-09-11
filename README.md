@@ -75,8 +75,10 @@ its own secret, deploy as a web app, and set `MANAGER_WEBAPP_URL` +
 **Sales of the Week:** every Thursday after the last sync (and on demand via
 the "Sales of the week now" button) the app ranks the past 7 days of *all*
 transactions per store by profit and appends a gold row to each manager tab
-listing the top 2 — the week divider for the Friday meeting. Date cells
-alternate tint by month for the monthly review.
+listing the top 2 — the week divider for the Friday meeting. Every month
+has its own Date-cell color (use "Filter by color" to view one month), and
+each store gets a fresh tab per year ("Reno 2026" → "Reno 2027"),
+created automatically on the first sale of the new year.
 
 ## Env vars
 
