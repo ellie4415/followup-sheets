@@ -49,6 +49,8 @@ SHEETS_SECRET = os.environ.get("SHEETS_SECRET", "")
 MANAGER_WEBAPP_URL = os.environ.get("MANAGER_WEBAPP_URL", "")   # manager sheet bridge (optional)
 MANAGER_SECRET     = os.environ.get("MANAGER_SECRET", "")
 MIN_CAMERA_PRICE = float(os.environ.get("MIN_CAMERA_PRICE", "100"))  # cheap disposables/novelty cameras don't qualify
+WEEKLY_DAY       = int(os.environ.get("WEEKLY_DAY", "3"))            # 0=Mon … 3=Thu: sales-of-the-week night
+TOP_SALES_PER_WEEK = int(os.environ.get("TOP_SALES_PER_WEEK", "2"))
 RUN_HOURS_START = int(os.environ.get("RUN_HOURS_START", "8"))   # first hourly run (Pacific)
 RUN_HOURS_END   = int(os.environ.get("RUN_HOURS_END", "20"))    # last hourly run (Pacific)
 if not (0 <= RUN_HOURS_START <= RUN_HOURS_END <= 23):
@@ -122,12 +124,15 @@ async def get_client() -> ls.LightspeedClient:
 
 # ── Sale fetching (sort=-saleID pagination; this account rejects timestamp filters) ──
 
-async def fetch_new_sales(client: ls.LightspeedClient, cursor: int) -> list:
+async def fetch_new_sales(client: ls.LightspeedClient, cursor: int,
+                          window_days: int = 0) -> list:
     """All sales with saleID > cursor, oldest first. When there is no cursor
-    yet (first run), falls back to a LOOKBACK_DAYS timestamp window."""
+    yet (first run) — or window_days is given — uses a timestamp window
+    instead (reimport_days override, else LOOKBACK_DAYS)."""
     since_str = ""
-    if cursor <= 0:
-        days = int(store.get("reimport_days") or 0) or LOOKBACK_DAYS
+    if window_days or cursor <= 0:
+        cursor = 0
+        days = window_days or int(store.get("reimport_days") or 0) or LOOKBACK_DAYS
         since = datetime.now(tz=PACIFIC) - timedelta(days=days)
         since_str = since.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         log.info(f"Lookback window: {days} days (since {since_str})")
@@ -591,7 +596,103 @@ async def run_job(trigger: str) -> dict:
     return summary
 
 
-async def _run_job_guarded(trigger: str) -> None:
+async def weekly_job(trigger: str) -> dict:
+    """Sales of the Week: rank the past 7 days of ALL transactions per store
+    by merchandise profit (same definition as the Total Profit column) and
+    append one gold marker row per store tab listing the top N — the week
+    divider Chris reads from in the Friday meeting. Idempotent per week via
+    the WEEK-<date> sale-ID sentinel."""
+    now_p = datetime.now(tz=PACIFIC)
+    week_end   = now_p.date()
+    week_start = week_end - timedelta(days=6)
+    week_id    = f"WEEK-{week_end:%Y-%m-%d}"
+    summary = {
+        "started": now_p.strftime("%-m/%-d/%Y %-I:%M %p"),
+        "trigger": trigger, "ok": False, "week": f"{week_start:%-m/%-d}–{week_end:%-m/%-d}",
+        "added": {}, "error": "",
+    }
+    try:
+        manager = _make_manager_sheets()
+        if manager is None:
+            raise RuntimeError("Manager sheet is not configured")
+        client = await get_client()
+        sheet  = _make_sheets()
+        await sheet.ensure_setup()
+        settings = await sheet.read_settings()
+        await manager.ensure_setup()
+
+        categories = await client.get_categories()
+        qual_ids   = ls.category_ids_under(categories, settings["categories"])
+        excl_ids   = ls.category_ids_under(categories, settings["excluded"])
+        shops      = await client.get_shops()
+        employees  = await client.get_employees()
+
+        sales = await fetch_new_sales(client, 0, window_days=7)
+        candidates: dict = {t: [] for t in sh.STORE_TABS}
+        for sale in sales:
+            if str(sale.get("completed")) != "true" or str(sale.get("voided")) == "true":
+                continue
+            shop_name = shops.get(str(sale.get("shopID", "")), "")
+            if shop_name.strip().lower() in settings["skip_shops"]:
+                continue
+            tab = _store_tab(shop_name)
+            if not tab:
+                continue
+            total = _fnum(sale.get("calcTotal"))
+            if total <= 0:
+                continue   # refunds/exchanges are never the sale of the week
+            items  = _line_items(await client.get_sale_lines(str(sale.get("saleID"))))
+            profit = sum(li["subtotal"] - li["cost"] for li in items
+                         if li["cat_id"] not in excl_ids)
+            if profit > 0:
+                candidates[tab].append((profit, total, sale, items))
+
+        for tab in sh.STORE_TABS:
+            if week_id in await manager.existing_sale_ids(tab):
+                summary["added"][tab] = "already posted"
+                continue
+            ranked = sorted(candidates[tab], key=lambda c: c[0], reverse=True)[:TOP_SALES_PER_WEEK]
+            lines = []
+            for rank, (profit, total, sale, items) in enumerate(ranked, start=1):
+                sellers = _salespeople(items, qual_ids, excl_ids, employees,
+                                       str(sale.get("employeeID", ""))) or ["?"]
+                cust = {}
+                cid = str(sale.get("customerID") or "0")
+                if cid not in ("", "0"):
+                    cust = await client.get_customer(cid)
+                cname = f"{(cust.get('firstName') or '').strip()} {(cust.get('lastName') or '').strip()}".strip() or "Walk-in"
+                merch = [li["name"] for li in items if li["cat_id"] not in excl_ids] \
+                        or [li["name"] for li in items]
+                what  = ", ".join(merch[:3]) + (" …" if len(merch) > 3 else "")
+                with_ = f" · with {', '.join(sellers[1:])}" if len(sellers) > 1 else ""
+                # Seller name FIRST so the bridge script colors it like any row.
+                lines.append(f"{sellers[0]} — #{rank}{with_} · {_money(profit)} profit "
+                             f"on {_money(total)} · {what} · {cname} · sale {sale.get('saleID')}")
+            if not lines:
+                lines = ["No transactions with merchandise profit this week"]
+            row = [
+                f"Week {week_start:%-m/%-d}–{week_end:%-m/%-d/%Y}",
+                "SALES OF THE WEEK",
+                "",
+                "\n".join(lines),
+                "", "",
+                week_id,
+            ]
+            await manager.append_rows(tab, [row])
+            summary["added"][tab] = len(ranked)
+
+        summary["ok"] = True
+        log.info(f"Sales of the week posted: {summary['added']}")
+    except ls.AuthExpired as exc:
+        summary["error"] = str(exc)
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        log.exception("Weekly job failed")
+    store.set_json("last_weekly", summary)
+    return summary
+
+
+async def _guarded(fn, trigger: str, key: str = "last_run") -> None:
     global _job_running
     if _job_lock.locked():
         return
@@ -600,9 +701,9 @@ async def _run_job_guarded(trigger: str) -> None:
         try:
             # Hard deadline — a hung run must never wedge the scheduler
             # (lab-sync July 3 lesson: everything inside a lock gets a timeout).
-            await asyncio.wait_for(run_job(trigger), timeout=1800)
+            await asyncio.wait_for(fn(trigger), timeout=1800)
         except asyncio.TimeoutError:
-            store.set_json("last_run", {
+            store.set_json(key, {
                 "started": datetime.now(tz=PACIFIC).strftime("%-m/%-d/%Y %-I:%M %p"),
                 "trigger": trigger, "ok": False,
                 "added": {t: 0 for t in sh.STORE_TABS}, "skipped": {},
@@ -611,6 +712,14 @@ async def _run_job_guarded(trigger: str) -> None:
             log.error("Run aborted at 30-minute deadline")
         finally:
             _job_running = False
+
+
+async def _run_job_guarded(trigger: str) -> None:
+    await _guarded(run_job, trigger, "last_run")
+
+
+async def _run_weekly_guarded(trigger: str) -> None:
+    await _guarded(weekly_job, trigger, "last_weekly")
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -630,6 +739,14 @@ async def scheduler_loop() -> None:
             await _run_job_guarded("scheduled")
         except Exception:
             log.exception("Scheduled run crashed")
+        # Sales of the Week: after the LAST sync of WEEKLY_DAY (Thursday
+        # night by default), so the Friday meeting has the full Fri–Thu week.
+        if nxt.weekday() == WEEKLY_DAY and nxt.hour == RUN_HOURS_END \
+                and _make_manager_sheets() is not None:
+            try:
+                await _run_weekly_guarded("scheduled")
+            except Exception:
+                log.exception("Weekly job crashed")
 
 
 @app.on_event("startup")
@@ -658,6 +775,8 @@ async def home(request: Request):
         "app_url":      APP_URL,
         "running":      _job_running,
         "last_run":     store.get_json("last_run"),
+        "last_weekly":  store.get_json("last_weekly"),
+        "manager_on":   _make_manager_sheets() is not None,
         "next_run":     store.get("next_run", ""),
         "config": {
             "Lightspeed client ID (LIGHTSPEED_CLIENT_ID)":            bool(CLIENT_ID),
@@ -691,6 +810,17 @@ async def trigger_run():
     if _job_lock.locked():
         return JSONResponse({"ok": False, "error": "A run is already in progress"}, status_code=409)
     asyncio.create_task(_run_job_guarded("manual"))
+    return {"ok": True}
+
+
+@app.post("/weekly")
+async def trigger_weekly():
+    """Post Sales of the Week now (past 7 days). Idempotent per week."""
+    if _job_lock.locked():
+        return JSONResponse({"ok": False, "error": "A run is already in progress"}, status_code=409)
+    if _make_manager_sheets() is None:
+        return JSONResponse({"ok": False, "error": "Manager sheet is not configured"}, status_code=400)
+    asyncio.create_task(_run_weekly_guarded("manual"))
     return {"ok": True}
 
 

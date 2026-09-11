@@ -72,6 +72,12 @@ profit data — share with managers only), paste
 its own secret, deploy as a web app, and set `MANAGER_WEBAPP_URL` +
 `MANAGER_SECRET` in Railway. Backfill it with the **Re-import** button.
 
+**Sales of the Week:** every Thursday after the last sync (and on demand via
+the "Sales of the week now" button) the app ranks the past 7 days of *all*
+transactions per store by profit and appends a gold row to each manager tab
+listing the top 2 — the week divider for the Friday meeting. Date cells
+alternate tint by month for the monthly review.
+
 ## Env vars
 
 | Variable | Purpose |
@@ -82,5 +88,7 @@ its own secret, deploy as a web app, and set `MANAGER_WEBAPP_URL` +
 | `MANAGER_WEBAPP_URL` / `MANAGER_SECRET` | Manager performance sheet bridge (optional) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` / `SHEET_ID` | Service-account fallback route |
 | `DATA_DIR` | Volume mount path (`/data` on Railway) |
-| `RUN_HOUR` | Daily run hour, Pacific (default 6) |
+| `RUN_HOURS_START` / `RUN_HOURS_END` | Hourly-sync window, Pacific hours (default 8–20) |
+| `WEEKLY_DAY` / `TOP_SALES_PER_WEEK` | Sales-of-the-week day (0=Mon, default 3=Thu) and how many to list (default 2) |
+| `MIN_CAMERA_PRICE` | Camera/lens items under this per-unit price don't qualify a sale (default 100) |
 | `LOOKBACK_DAYS` | History window for the very first run (default 7) |

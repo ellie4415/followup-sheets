@@ -72,6 +72,10 @@
       <button class="btn btn-primary" onclick="runNow(this)">Run now</button>
       <button class="btn btn-ghost" style="margin-left:8px" onclick="reimport(this)"
               title="Re-pulls the last 7 days. Rows already on the sheet are skipped, so delete any rows you want regenerated first.">Re-import last 7 days</button>
+      {% if manager_on %}
+      <button class="btn btn-ghost" style="margin-left:8px" onclick="weekly(this)"
+              title="Ranks the past 7 days of ALL transactions by profit and posts a gold Sales of the Week row on each manager tab. Automatic Thursday nights.">Sales of the week now</button>
+      {% endif %}
     {% endif %}
     <table style="margin-top:14px">
       <tr><td>Next scheduled run (hourly during open hours)</td><td>{{ next_run or "—" }}</td></tr>
@@ -91,6 +95,15 @@
       {% endif %}
       {% endif %}
     </table>
+    {% if last_weekly %}
+    <table style="margin-top:10px">
+      <tr><td>Sales of the week (last posted)</td><td>{{ last_weekly.started }} — week {{ last_weekly.week }}
+        {% if last_weekly.ok %}<span class="pill ok">OK</span>{% else %}<span class="pill bad">Failed</span>{% endif %}
+        {% if last_weekly.ok %}({% for tab, n in last_weekly.added.items() %}{{ tab }}: {{ n }}{{ ", " if not loop.last }}{% endfor %}){% endif %}
+      </td></tr>
+    </table>
+    {% if last_weekly.error %}<div class="err">{{ last_weekly.error }}</div>{% endif %}
+    {% endif %}
     {% if last_run and last_run.error %}<div class="err">{{ last_run.error }}</div>{% endif %}
     {% if last_run and last_run.warnings %}
       {% for w in last_run.warnings %}<div class="err" style="color:#9a6b00">⚠ {{ w }}</div>{% endfor %}
@@ -106,6 +119,12 @@
 async function runNow(btn) {
   btn.disabled = true; btn.textContent = "Starting…";
   await fetch("/run", { method: "POST" });
+  poll();
+}
+async function weekly(btn) {
+  if (!confirm("Post Sales of the Week now?\n\nRanks the past 7 days of all transactions by profit and adds a gold row per store tab on the manager sheet. Safe to re-run — it won't post twice for the same week.")) return;
+  btn.disabled = true; btn.textContent = "Starting…";
+  await fetch("/weekly", { method: "POST" });
   poll();
 }
 async function reimport(btn) {

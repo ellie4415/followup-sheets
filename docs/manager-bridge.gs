@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 4, existing: existing });
+  return json_({ ok: true, v: 5, existing: existing });
 }
 
 function doPost(e) {
@@ -92,7 +92,9 @@ function doPost(e) {
       for (let i = 0; i < a.rows.length; i++) {
         colorizeRow_(sh, start + i,
                      String(a.rows[i][ITEMS_COL - 1] || ''),
-                     String(a.rows[i][CASHIER_COL - 1] || ''));
+                     String(a.rows[i][CASHIER_COL - 1] || ''),
+                     String(a.rows[i][0] || ''),
+                     String(a.rows[i][SALE_ID_COL - 1] || ''));
       }
     });
   } finally {
@@ -101,7 +103,20 @@ function doPost(e) {
   return json_({ ok: true });
 }
 
-function colorizeRow_(sh, rowIdx, itemsText, cashierText) {
+// Month separation: the Date cell alternates tint by calendar month so a
+// month boundary is visible at a glance while scrolling.
+const MONTH_TINTS = ['#e3f2fd', '#fff8e1'];   // even months, odd months
+const WEEK_ROW_BG = '#fff2cc';                // Sales of the Week marker rows
+
+function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
+  // Sales of the Week rows (Sale ID "WEEK-…"): whole row gold + bold label.
+  if (saleId && saleId.indexOf('WEEK-') === 0) {
+    sh.getRange(rowIdx, 1, 1, HEADERS.length).setBackground(WEEK_ROW_BG);
+    sh.getRange(rowIdx, 1, 1, 2).setFontWeight('bold');
+  } else if (dateText) {
+    const m = dateText.match(/^(\d{1,2})\/\d{1,2}\/\d{4}/);
+    if (m) sh.getRange(rowIdx, 1).setBackground(MONTH_TINTS[parseInt(m[1], 10) % 2]);
+  }
   // Items cell ("Name — item" per line): item text stays BLACK; only the
   // employee name BEFORE the first " — " takes that employee's color (bold).
   // Sheets cannot background-highlight PART of a cell — text styling is the
@@ -254,7 +269,9 @@ function flipItemLines() {
       }).join('\n');
       cell.setValue(flipped);
       colorizeRow_(sh, r, flipped,
-                   String(sh.getRange(r, CASHIER_COL).getValue() || ''));
+                   String(sh.getRange(r, CASHIER_COL).getValue() || ''),
+                   String(sh.getRange(r, 1).getValue() || ''),
+                   String(sh.getRange(r, SALE_ID_COL).getValue() || ''));
     }
   });
   props.setProperty('flip_done', '1');
@@ -274,7 +291,9 @@ function recolorAll() {
     for (let r = 2; r <= last; r++) {
       colorizeRow_(sh, r,
                    String(sh.getRange(r, ITEMS_COL).getValue() || ''),
-                   String(sh.getRange(r, CASHIER_COL).getValue() || ''));
+                   String(sh.getRange(r, CASHIER_COL).getValue() || ''),
+                   String(sh.getRange(r, 1).getValue() || ''),
+                   String(sh.getRange(r, SALE_ID_COL).getValue() || ''));
     }
   });
 }

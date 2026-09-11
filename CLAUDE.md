@@ -35,6 +35,19 @@ The same poll feeds two spreadsheets:
 Both dedup by sale ID; the cursor advances only after BOTH sheets' appends
 succeed, so a failure on either retries the whole batch harmlessly.
 
+**Sales of the Week (manager sheet, Sept 2026):** `weekly_job` runs after
+the last sync of WEEKLY_DAY (Thursday, 8 PM) and via POST /weekly. It
+scans ALL transactions of the past 7 days (no camera/threshold filter),
+ranks per store by merchandise profit (same definition as Total Profit —
+lab/service lines have no cost data and would win on phantom profit),
+skips refunds/exchanges, and appends ONE marker row per store tab:
+Date "Week M/D–M/D/YYYY", Customer "SALES OF THE WEEK", Items = top
+TOP_SALES_PER_WEEK lines ("Seller — #1 · $profit on $total · items ·
+customer · sale N" — seller first so the script colors it), Sale ID
+"WEEK-YYYY-MM-DD" (the idempotency sentinel — never a real sale ID). The
+bridge script (v5) paints WEEK- rows gold+bold and tints normal rows' Date
+cell by month parity (MONTH_TINTS) — that's the month divider.
+
 ## Qualification rule (the follow-up product)
 
 Sale is logged when: `completed == 'true'` AND not voided AND total > 0
