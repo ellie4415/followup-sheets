@@ -254,6 +254,11 @@ def _line_items(lines: list) -> list:
             "cost":     unit_cost * qty,
             "fifo_raw": fifo,
             "avg_raw":  avg,
+            # Discount fields, raw — which one Lightspeed populates (line vs
+            # prorated sale-level) is being verified via /debug-sale.
+            "disc_raw": {k: sl.get(k) for k in ("calcLineDiscount", "discountAmount",
+                                                "discountPercent", "calcTotal")
+                         if sl.get(k) not in (None, "")},
         })
     return out
 
@@ -957,6 +962,7 @@ async def debug_sale(number: str):
                 "counts_toward_threshold": not excluded,
                 "cost_basis":      {"fifoCost": li["fifo_raw"], "avgCost": li["avg_raw"],
                                     "cost_used": round(li["cost"], 2)},
+                "discount_raw":    li["disc_raw"],
                 "profit":          round(li["subtotal"] - li["cost"], 2),
             })
 
@@ -972,6 +978,10 @@ async def debug_sale(number: str):
             "shop_recognized":      bool(_store_tab(shop_name)),
             "shop_not_skipped":     shop_name.strip().lower() not in settings["skip_shops"],
             "sale_total":           total,
+            "sale_discount_raw":    {k: sale.get(k) for k in ("calcDiscount", "discountAmount",
+                                                             "discountPercent", "calcSubtotal",
+                                                             "calcFees", "calcNonTaxable")
+                                     if sale.get(k) not in (None, "")},
             "total_positive":       total > 0,
             "has_customer":         str(sale.get("customerID") or "0") not in ("", "0"),
             "camera_or_lens_item":  camera_hit,
