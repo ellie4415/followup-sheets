@@ -135,12 +135,29 @@ async def get_client() -> ls.LightspeedClient:
 
 # ── Sale fetching (sort=-saleID pagination; this account rejects timestamp filters) ──
 
-BULK_RELATIONS = '["SaleLines","SaleLines.Item","Customer","Customer.Contact","SalePayments","SalePayments.PaymentType"]'
-# Sales paid ENTIRELY with these payment types are charged to a customer
-# account (POs pushed through the register) — no money received that day, so
-# they never count as a Sale of the Week (Ellie, Sept 11 2026).
+BULK_RELATIONS = ('["SaleLines","SaleLines.Item","Customer","Customer.Contact",'
+                  '"Customer.CreditAccount","SalePayments","SalePayments.PaymentType"]')
+# A PO pushed through the register is paid ENTIRELY on the customer's account
+# AND leaves them owing a big balance afterwards — no money received. A
+# prepaid special-order pickup ALSO shows "Credit Account" (it draws down
+# money they already paid) but leaves ~no balance, so it still counts
+# (Ellie, Sept 11 2026). Both conditions are required.
 PO_PAYMENT_TYPES = [t.strip().lower() for t in
                     os.environ.get("PO_PAYMENT_TYPES", "Credit Account").split(",") if t.strip()]
+PO_BALANCE_FRACTION = float(os.environ.get("PO_BALANCE_FRACTION", "0.5"))  # owed ≥ 50% of the sale → PO
+
+
+async def _balance_owed(client: ls.LightspeedClient, sale: dict) -> float:
+    """Customer's current account balance owed (0 for walk-ins / no account).
+    Embedded by the bulk fetch (Customer.CreditAccount) when available."""
+    cid = str(sale.get("customerID") or "0")
+    if cid in ("", "0"):
+        return 0.0
+    cust = sale.get("Customer") if isinstance(sale.get("Customer"), dict) else {}
+    ca = cust.get("CreditAccount") if isinstance(cust.get("CreditAccount"), dict) else None
+    if ca is None:
+        ca = await client.get_customer_credit(cid)
+    return max(0.0, _fnum(ca.get("balance")))
 
 
 async def _sale_payments(client: ls.LightspeedClient, sale: dict) -> list:
@@ -157,13 +174,17 @@ async def _sale_payments(client: ls.LightspeedClient, sale: dict) -> list:
     return out
 
 
-def _is_po(payments: list, total: float) -> bool:
-    """True when the on-account payments cover the whole sale."""
+def _paid_on_account(payments: list, total: float) -> bool:
     if total <= 0:
         return False
     on_account = sum(p["amount"] for p in payments
                      if any(k in p["type"].lower() for k in PO_PAYMENT_TYPES))
     return on_account >= total - 0.01
+
+
+def _is_po(payments: list, total: float, balance_owed: float) -> bool:
+    """Paid entirely on account AND the customer still owes a big balance."""
+    return _paid_on_account(payments, total) and balance_owed >= PO_BALANCE_FRACTION * total
 
 
 def _bulk_relations_ok() -> bool:
@@ -767,7 +788,8 @@ async def _pick_top(client, cands: list, n: int) -> tuple:
         if len(picked) >= n:
             break
         profit, immediate, total, sale, items = cand
-        if _is_po(await _sale_payments(client, sale), total):
+        pays = await _sale_payments(client, sale)
+        if _paid_on_account(pays, total) and _is_po(pays, total, await _balance_owed(client, sale)):
             po_skipped += 1
             continue
         picked.append(cand)
@@ -1075,6 +1097,7 @@ async def debug_weekly(days: int = 7, top: int = 5):
             rows = []
             for profit, immediate, total, sale, items in sorted(cands[tab], key=lambda c: c[0], reverse=True)[:top]:
                 pays = await _sale_payments(client, sale)
+                owed = await _balance_owed(client, sale) if _paid_on_account(pays, total) else 0.0
                 rows.append({
                     "sale_id":   str(sale.get("saleID")),
                     "sellers":   _salespeople(items, set(), excl_ids, employees,
@@ -1082,7 +1105,8 @@ async def debug_weekly(days: int = 7, top: int = 5):
                     "profit":    _money(profit), "immediate": _money(immediate),
                     "total":     _money(total),
                     "payments":  [f"{p['type']} {_money(p['amount'])}" for p in pays],
-                    "is_PO_excluded": _is_po(pays, total),
+                    "account_balance_owed": _money(owed),
+                    "is_PO_excluded": _is_po(pays, total, owed),
                     "has_own_row":    str(sale.get("saleID")) in on_sheet,
                     "items":     [li["name"] for li in items],
                 })
@@ -1226,11 +1250,13 @@ async def debug_sale(number: str):
         }
 
         pays = await _sale_payments(client, sale)
+        owed = await _balance_owed(client, sale) if _paid_on_account(pays, total) else 0.0
         return {
             "sale_id":      sale_id,
             "ticket":       str(sale.get("ticketNumber", "")),
             "payments":     [f"{p['type']} {_money(p['amount'])}" for p in pays],
-            "is_PO_(excluded_from_sales_of_the_week)": _is_po(pays, total),
+            "account_balance_owed": _money(owed),
+            "is_PO_(excluded_from_sales_of_the_week)": _is_po(pays, total, owed),
             "would_add":    would_add,
             "added_because": ("camera/lens item" if camera_hit else
                               "over threshold" if over_threshold else "—"),

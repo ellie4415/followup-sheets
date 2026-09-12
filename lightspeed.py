@@ -229,6 +229,23 @@ class LightspeedClient:
             log.warning(f"get_sale_payments({sale_id}): {exc}")
             return []
 
+    async def get_customer_credit(self, customer_id: str) -> dict:
+        """The customer's CreditAccount (balance owed) — for telling a PO
+        charged to the account from a prepaid pickup drawn down from it."""
+        try:
+            data = await self.get(f"Customer/{customer_id}.json",
+                                  params={"load_relations": '["CreditAccount"]'})
+            cust = data.get("Customer", {})
+            if isinstance(cust, list):
+                cust = cust[0] if cust else {}
+            ca = cust.get("CreditAccount")
+            return ca if isinstance(ca, dict) else {}
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise
+            log.warning(f"get_customer_credit({customer_id}): {exc}")
+            return {}
+
     async def get_customer(self, customer_id: str) -> dict:
         for lr in ('["Contact"]', None):
             try:
