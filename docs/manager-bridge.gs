@@ -59,7 +59,7 @@ function doGet(e) {
           .filter(String)
       : [];
   });
-  return json_({ ok: true, v: 8, existing: existing });
+  return json_({ ok: true, v: 9, existing: existing });
 }
 
 function doPost(e) {
@@ -90,6 +90,11 @@ function doPost(e) {
       const anchor = lastDataRow_(sh);
       sh.insertRowsAfter(anchor, a.rows.length);
       const start = anchor + 1;
+      // Inserted rows inherit the formatting of the row above — after a
+      // Thursday that's the gold Sales-of-the-Week row, which turned every
+      // later sale yellow. Reset before styling.
+      sh.getRange(start, 1, a.rows.length, HEADERS.length)
+        .setBackground(null).setFontWeight('normal').setFontColor(null);
       sh.getRange(start, 1, a.rows.length, a.rows[0].length)
         .setValues(a.rows);
       for (let i = 0; i < a.rows.length; i++) {
@@ -129,7 +134,12 @@ function colorizeRow_(sh, rowIdx, itemsText, cashierText, dateText, saleId) {
   if (saleId && saleId.indexOf('WEEK-') === 0) {
     sh.getRange(rowIdx, 1, 1, HEADERS.length).setBackground(WEEK_ROW_BG);
     sh.getRange(rowIdx, 1, 1, 2).setFontWeight('bold');
-  } else if (dateText) {
+  } else {
+    // A regular row: start from a clean slate so recolorAll can repair rows
+    // that inherited the gold week-row fill.
+    sh.getRange(rowIdx, 1, 1, HEADERS.length).setBackground(null).setFontWeight('normal');
+  }
+  if (!(saleId && saleId.indexOf('WEEK-') === 0) && dateText) {
     // dateText is "M/D/YYYY" from the app, or the cell's DISPLAY value when
     // restyling (the cell itself holds a real Date, so getValue() would give
     // a Date object — that's why an earlier recolorAll skipped the months).
