@@ -162,6 +162,8 @@ assert mk.is_mack("MACK 5 Yr Under $750")
 assert not mk.is_mack("Mackie speaker") and not mk.is_mack("Camera bag (Mack)")
 assert mk.unit_price({"unitQuantity": "1", "calcSubtotal": "1999", "calcLineDiscount": "200"}) == 1799.0
 assert mk.unit_price({"unitQuantity": "-1", "calcSubtotal": "-239.95", "calcLineDiscount": "0"}) == 239.95
+assert mk.model_from("Canon EOS R7+", "Canon") == "EOS R7"
+assert mk.model_from("Sony A7 IV Kit w/ 28-70mm +", "Sony") == "A7 IV Kit w/ 28-70mm"
 print("parsers: OK")
 
 # ── 6. endpoint auth
@@ -174,5 +176,6 @@ r = tc.get("/mack/sale/101", headers={"X-Mack-Secret": "mack-secret"})
 assert r.status_code == 200 and r.json()["sale_id"] == "101", r.text
 assert tc.get("/mack/sale/abc", headers={"X-Mack-Secret": "mack-secret"}).status_code == 400
 r = tc.get("/mack/preview?days=3"); assert r.status_code == 200 and r.json()["count"] == 6 and "customer" not in r.json()["units"][0], r.text
+assert "Load past Mack warranties" in tc.get("/").text
 print("endpoints: OK")
 print("ALL SERVER TESTS PASSED")

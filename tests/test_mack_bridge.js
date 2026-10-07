@@ -109,8 +109,18 @@ eq([row[M['WarrType']], row[M['DealerInvoice#']], row[M['EquipmentPurchaseDate']
 var bad = JSON.parse(JSON.stringify(reg)); bad.customer.phone = ''; bad.slots[1].serial = '';
 bad.slots.push({ make: 'a', model: 'b', serial: 'c' }, { make: 'd', model: 'e', serial: 'f' });
 eq(registrationProblems_(bad), ['Customer phone is missing.', 'Mack files hold at most 3 items per warranty.',
-   'Item 2 needs a serial number (or N/A).'], 'problems listed');
+   'Item 2 needs its serial number.'], 'problems listed');
 eq(parsePlan_('Mack 1 Yr Used Photo Under $1,000 OL'), { years: 1, coverage: 1000, condition: 'Used' }, 'parsePlan');
 eq(shortName_('Pat Q Test'), 'Pat T.', 'shortName');
 
 print(failures ? failures + ' FAILURE(S)' : 'ALL BRIDGE TESTS PASSED');
+
+// v2: serial rule, kits
+eq([realSerial_('ABC123'), realSerial_('N/A'), realSerial_('na'), realSerial_(''), realSerial_('none'), realSerial_('0')],
+   [true, false, false, false, false, false], 'serials: N/A and blanks are not serials');
+eq([isKitName_('Canon EOS R7 Kit w/ 18-150mm+', ['kit', 'w/']), isKitName_('Kitchen scale', ['kit']), isKitName_('Sony A7 IV', ['kit', 'w/'])],
+   [true, false, false], 'kit names');
+eq(normKit_('Canon EOS R7 Kit w/ 18-150mm +'), normKit_('canon eos r7 kit w/ 18-150mm'), 'kit names match with or without +');
+var reg2 = JSON.parse(JSON.stringify(reg)); reg2.slots[1].serial = 'N/A';
+eq(registrationProblems_(reg2), ['Item 2 needs its serial number.'], 'N/A serial rejected on save');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V2 BRIDGE TESTS PASSED');

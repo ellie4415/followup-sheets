@@ -9,8 +9,11 @@
  *     added by the Chrome extension's Mack panel.
  *   - Codes tab: Lightspeed warranty item -> Mack WarrType code (Melinda
  *     fills these in by hand; new items appear automatically).
+ *   - Kits tab: the camera and lens names Mack should get for each kit
+ *     (kits seen in the panel are added automatically, blank, to fill in).
  *   - Staff tab: who gets reminder emails.
- *   - Mack menu: make the file for Mack, refresh, reminders on/off.
+ *   - Mack menu: make the file for Mack, load past warranties, refresh,
+ *     reminders on/off.
  *
  * Install (same steps as the other bridges)
  *   1. Extensions > Apps Script > delete any code > paste this file.
@@ -19,6 +22,8 @@
  *      access: Anyone > Deploy. Approve the permissions.
  *   4. Railway env vars: MACK_WEBAPP_URL = the /exec URL, MACK_SECRET = SECRET.
  *   5. Extension settings: Mack address = the /exec URL, Mack key = STAFF_KEY.
+ *   Updating to a new version of this file: copy your SECRET, STAFF_KEY and
+ *   APP_URL lines first, paste the new file, put the three lines back.
  *   After ANY later edit: Ctrl+S first, then Deploy > Manage deployments >
  *   pencil > Version: New version > Deploy. Saving alone does not change
  *   what the web app runs.
@@ -27,12 +32,13 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 1;
+const VERSION   = 2;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
 const CODES_TAB = 'Codes';
 const STAFF_TAB = 'Staff';
+const KITS_TAB = 'Kits';
 const SETTINGS_TAB = 'Settings';
 const FILE_TAB_NAME = 'API  use dates or po#';   // Mack's template tab name (two spaces)
 
@@ -133,6 +139,9 @@ function onOpen() {
     .addItem('Make the file for Mack', 'makeMackFile')
     .addItem('Refresh statuses', 'refreshStatuses')
     .addSeparator()
+    .addItem('Load past warranties from Lightspeed', 'loadPastWarranties')
+    .addItem('Mark selected rows as registered before this sheet', 'markRegisteredBefore')
+    .addSeparator()
     .addItem('Send reminders now', 'sendReminders')
     .addItem('Turn on daily reminders', 'turnOnReminders')
     .addItem('Turn off daily reminders', 'turnOffReminders')
@@ -224,7 +233,7 @@ function registrationProblems_(reg) {
   if (slots.length > 3) out.push('Mack files hold at most 3 items per warranty.');
   slots.forEach(function (s, i) {
     if (!s.make || !s.model) out.push('Item ' + (i + 1) + ' needs a brand and model.');
-    if (!s.serial) out.push('Item ' + (i + 1) + ' needs a serial number (or N/A).');
+    if (!realSerial_(s.serial)) out.push('Item ' + (i + 1) + ' needs its serial number.');
   });
   if (!reg.gear_sale) out.push('The gear receipt number is missing.');
   if (!reg.gear_date || !reg.warranty_date) out.push('A purchase date is missing.');
@@ -412,6 +421,7 @@ function pending_(store) {
 function saleForPanel_(n) {
   const bundle = fetchSale_(n);
   if (bundle.error) return { ok: false, error: bundle.error };
+  addNewKits_(bundle.lines);
   const sold = readRows_(sheet_(SOLD_TAB), SOLD_HEADERS.length);
   const regs = readRows_(sheet_(REG_TAB), REG_WIDTH);
   const codes = readCodes_();
@@ -459,6 +469,7 @@ function saleForPanel_(n) {
 function gearForPanel_(n) {
   const bundle = fetchSale_(n);
   if (bundle.error) return { ok: false, error: bundle.error };
+  addNewKits_(bundle.lines);
   return { ok: true, v: VERSION, sale: bundle };
 }
 
@@ -481,6 +492,7 @@ function rules_() {
   return {
     block_words: splitList_(s[4]), kit_words: splitList_(s[5]),
     max_items: Number(s[6]) || 3, max_days: Number(s[7]) || 30,
+    kits: readKits_(),
   };
 }
 
@@ -647,6 +659,103 @@ function turnOffReminders() {
   });
 }
 
+// ── Past warranties (moving over from the tablet) ──────────────────────────
+
+function loadPastWarranties() {
+  const ui = SpreadsheetApp.getUi();
+  const answer = ui.prompt('Load past warranties from Lightspeed',
+    'How many days back? (up to 45)\n\nThey land on the Sold tab as Waiting. Warranties already registered on the ' +
+    'tablet: select their rows on the Sold tab, then use Mack > Mark selected rows as registered before this sheet.',
+    ui.ButtonSet.OK_CANCEL);
+  if (answer.getSelectedButton() !== ui.Button.OK) return;
+  const days = Math.min(45, Math.max(1, parseInt(answer.getResponseText(), 10) || 14));
+  const res = UrlFetchApp.fetch(APP_URL.replace(/\/$/, '') + '/mack/rescan?days=' + days, {
+    method: 'post', headers: { 'X-Mack-Secret': SECRET }, muteHttpExceptions: true,
+  });
+  let data = {};
+  try { data = JSON.parse(res.getContentText()); } catch (err) {}
+  if (data.ok) {
+    ui.alert('Loading the last ' + days + ' days. The warranties appear on the Sold tab in a minute or two.');
+  } else {
+    ui.alert('The follow-up app could not start that: ' + (data.error || 'HTTP ' + res.getResponseCode()) +
+      '\n\nIf it says a run is in progress, try again in a few minutes.');
+  }
+}
+
+function markRegisteredBefore() {
+  const ui = SpreadsheetApp.getUi();
+  const sh = SpreadsheetApp.getActiveSheet();
+  if (sh.getName() !== SOLD_TAB) {
+    ui.alert('Go to the Sold tab and select the rows (any cell in each row) first.');
+    return;
+  }
+  const rows = {};
+  (sh.getActiveRangeList() ? sh.getActiveRangeList().getRanges() : []).forEach(function (r) {
+    for (let i = r.getRow(); i <= r.getLastRow(); i++) if (i >= 2) rows[i] = true;
+  });
+  const list = Object.keys(rows).map(Number);
+  if (!list.length) { ui.alert('Select the rows to mark first.'); return; }
+  let marked = 0;
+  withLock_(function () {
+    list.forEach(function (i) {
+      const cell = sh.getRange(i, S['Handled Outside'] + 1);
+      const status = String(sh.getRange(i, S['Status'] + 1).getValue());
+      if (!String(cell.getValue()).trim() && status === 'Waiting') {
+        cell.setValue('Registered before this sheet');
+        marked++;
+      }
+    });
+    refreshStatuses_();
+  });
+  ui.alert(marked + ' row(s) marked. Rows that were not Waiting were left alone.');
+}
+
+// ── Kits ───────────────────────────────────────────────────────────────────
+
+function readKits_() {
+  const out = {};
+  readRows_(sheet_(KITS_TAB), 5).forEach(function (r) {
+    const camera = String(r[1] || '').trim();
+    const lenses = [r[2], r[3]].map(function (v) { return String(v || '').trim(); }).filter(String);
+    if (r[0] && (camera || lenses.length)) out[normKit_(r[0])] = { camera: camera, lenses: lenses };
+  });
+  return out;
+}
+
+// Kit items seen in the panel get a blank row on the Kits tab to fill in.
+function addNewKits_(lines) {
+  const words = splitList_(readSettings_()[5]).map(function (w) { return w.toLowerCase(); });
+  const sh = sheet_(KITS_TAB);
+  const have = {};
+  readRows_(sh, 1).forEach(function (r) { have[normKit_(r[0])] = true; });
+  const add = [];
+  (lines || []).forEach(function (l) {
+    if (l.is_mack || l.qty <= 0 || !isKitName_(l.name, words)) return;
+    const key = normKit_(l.name);
+    if (have[key]) return;
+    have[key] = true;
+    add.push([String(l.name).replace(/\s*\++\s*$/, ''), '', '', '', '']);
+  });
+  if (add.length) {
+    withLock_(function () { sh.getRange(sh.getLastRow() + 1, 1, add.length, 5).setValues(add); });
+  }
+}
+
+function isKitName_(name, words) {
+  const text = ' ' + String(name || '').toLowerCase() + ' ';
+  return words.some(function (w) {
+    if (/^[a-z0-9 ]+$/.test(w)) return new RegExp('[^a-z0-9]' + w.replace(/ /g, '\\s+') + '[^a-z0-9]').test(text);
+    return text.indexOf(w) >= 0;
+  });
+}
+
+function normKit_(s) { return normItem_(s).replace(/\s*\++$/, ''); }
+
+function realSerial_(s) {
+  const v = String(s || '').trim();
+  return !!v && !/^(n\/?a|none|no serial|-+|0+)$/i.test(v);
+}
+
 // ── Codes, staff, settings ─────────────────────────────────────────────────
 
 function readCodes_() {
@@ -738,6 +847,19 @@ function ensureSetup_() {
     sh.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied('=AND($A2<>"",$B2="")').setBackground('#fce5cd')
       .setRanges([sh.getRange('B2:B')]).build()]);
+  }
+  if (!ss.getSheetByName(KITS_TAB)) {
+    const sh = ss.insertSheet(KITS_TAB);
+    sh.getRange(1, 1, 1, 5).setValues([['Lightspeed kit item', 'Camera model for Mack', 'Lens 1 model for Mack',
+      'Lens 2 model for Mack (two-lens kits)', 'Notes']]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(1, 340);
+    [2, 3, 4].forEach(function (c) { sh.setColumnWidth(c, 220); });
+    sh.getRange(1, 1).setNote('Type or paste the kit name as it appears in Lightspeed (a "+" at the end does not matter). ' +
+      'The panel uses these names instead of splitting the item name. Kits looked up in the panel are added here automatically.');
+    sh.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($A2<>"",$B2="")').setBackground('#fce5cd')
+      .setRanges([sh.getRange('B2:C')]).build()]);
   }
   if (!ss.getSheetByName(STAFF_TAB)) {
     const sh = ss.insertSheet(STAFF_TAB);

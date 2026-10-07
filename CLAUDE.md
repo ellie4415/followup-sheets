@@ -76,10 +76,17 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
   (Ellie, Oct 7 2026: the gear's transaction ID is what matters when the
   warranty is bought later). WarrType codes are filled by Melinda on the
   Codes tab; rows without one are held out of the file.
+- Item names ending in "+" carry California's fee in Lightspeed: the "+"
+  is stripped from models (server `model_from`, panel `cleanModel`). Kit
+  models come from the sheet's Kits tab (camera, lens 1, lens 2) when
+  present, else from splitting "w/ A & B". Every covered item needs a real
+  serial (no N/A) and its own price; EquipmentValue = the prices added up;
+  any item, kit lenses included, can be removed (Ellie, Oct 7 2026).
 - `/mack/preview?days=N` lists detected units with no customer details;
-  `/mack/rescan?days=N` re-sends a window (recovery only: anything registered
-  some other way then shows as Waiting; mark it in the Sold tab's
-  "Handled Outside" column).
+  `/mack/rescan?days=N` re-sends a window (home-page button and the sheet's
+  Mack > Load past warranties both call it). Anything registered some other
+  way then shows as Waiting: Mack > Mark selected rows as registered before
+  this sheet fills the Sold tab's "Handled Outside" column.
 - Tests: `python tests/test_mack.py` (needs requirements installed) and
   `jsc docs/mack-bridge.gs tests/test_mack_bridge.js`.
 

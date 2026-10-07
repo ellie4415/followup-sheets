@@ -72,6 +72,10 @@
       <button class="btn btn-primary" onclick="runNow(this)">Run now</button>
       <button class="btn btn-ghost" style="margin-left:8px" onclick="reimport(this)"
               title="Re-pulls the last 7 days. Rows already on the sheet are skipped, so delete any rows you want regenerated first.">Re-import last 7 days</button>
+      {% if mack_on %}
+      <button class="btn btn-ghost" style="margin-left:8px" onclick="mackLoad(this)"
+              title="Adds the Mack warranties sold or returned in the last N days to the Mack sheet's Sold tab. Ones already there are skipped.">Load past Mack warranties</button>
+      {% endif %}
       {% if manager_on %}
       <button class="btn btn-ghost" style="margin-left:8px" onclick="weekly(this)"
               title="Ranks the past 7 days of ALL transactions by profit and posts a gold Sales of the Week row on each manager tab. Automatic Thursday nights.">Sales of the week now</button>
@@ -104,6 +108,14 @@
     </table>
     {% if last_weekly.error %}<div class="err">{{ last_weekly.error }}</div>{% endif %}
     {% endif %}
+    {% if last_mack_rescan %}
+    <table style="margin-top:10px">
+      <tr><td>Past Mack warranties (last load)</td><td>{{ last_mack_rescan.started }}, last {{ last_mack_rescan.days }} days
+        {% if last_mack_rescan.ok %}<span class="pill ok">OK</span> ({{ last_mack_rescan.sent }} found, {{ last_mack_rescan.added }} new on the sheet){% else %}<span class="pill bad">Failed</span>{% endif %}
+      </td></tr>
+    </table>
+    {% if last_mack_rescan.error %}<div class="err">{{ last_mack_rescan.error }}</div>{% endif %}
+    {% endif %}
     {% if last_run and last_run.error %}<div class="err">{{ last_run.error }}</div>{% endif %}
     {% if last_run and last_run.warnings %}
       {% for w in last_run.warnings %}<div class="err" style="color:#9a6b00">⚠ {{ w }}</div>{% endfor %}
@@ -132,6 +144,13 @@ async function reimport(btn) {
   if (days === null) return;
   btn.disabled = true; btn.textContent = "Starting…";
   await fetch("/reimport?days=" + encodeURIComponent(parseInt(days, 10) || 0), { method: "POST" });
+  poll();
+}
+async function mackLoad(btn) {
+  const days = prompt("Load Mack warranties from how many days back? (max 45)\n\nThey land on the Mack sheet's Sold tab as Waiting. Ones registered on the tablet already: select their rows and use Mack > Mark selected rows as registered before this sheet.", "14");
+  if (days === null) return;
+  btn.disabled = true; btn.textContent = "Starting…";
+  await fetch("/mack/rescan?days=" + encodeURIComponent(parseInt(days, 10) || 14), { method: "POST" });
   poll();
 }
 async function poll() {

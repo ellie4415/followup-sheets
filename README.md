@@ -105,12 +105,18 @@ Setup, in this order:
 3. **Railway.** Set `MACK_WEBAPP_URL` (the /exec URL) and `MACK_SECRET` (the
    same value as `SECRET`). The app redeploys; the home page checklist shows
    the Mack sheet as configured.
-4. **Check detection.** Open `/mack/preview?days=14` on the app and compare
-   it with the Mack warranties staff actually sold in the last two weeks.
+4. **Load past warranties.** In the sheet: Mack > Load past warranties
+   from Lightspeed (or the "Load past Mack warranties" button on the app
+   page). They land on the Sold tab as Waiting. For the ones already
+   registered on the tablet, select their rows and use Mack > Mark selected
+   rows as registered before this sheet. (`/mack/preview?days=14` on the app
+   lists what it finds without adding anything.)
 5. **Fill in the sheet.** Codes tab: the WarrType code for each warranty
-   item (new items appear on their own, highlighted until coded). Staff tab:
-   an email for each salesperson. Settings tab: the manager email for the
-   daily summary.
+   item (new items appear on their own, highlighted until coded). Kits tab:
+   the camera and lens names Mack should get for each kit, Lens 2 for
+   two-lens kits (kits looked up in the panel are added on their own). Staff
+   tab: an email for each salesperson. Settings tab: the manager email for
+   the daily summary.
 6. **Extension.** Upload 0.13.0 to the Chrome Web Store. Once it's on the
    store computers, open its settings: paste the /exec URL as the Mack sheet
    address and `STAFF_KEY` as the Mack key (Chrome sync copies both to every
@@ -118,8 +124,11 @@ Setup, in this order:
 7. **Go live.** Tell staff to use Mack in the sidebar instead of the tablet.
    When you're ready for emails, use Mack > Turn on daily reminders.
 
-Every later edit to the script: Ctrl+S first, then Deploy > Manage
-deployments > pencil > Version: New version > Deploy.
+Updating the script to a newer version of `docs/mack-bridge.gs`: copy
+your `SECRET`, `STAFF_KEY` and `APP_URL` lines first, paste the new file,
+put those three lines back, Ctrl+S, then Deploy > Manage deployments >
+pencil > Version: New version > Deploy. Saving alone does not update what
+the web app runs.
 
 ## Env vars
 

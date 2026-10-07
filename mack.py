@@ -263,11 +263,13 @@ async def _serials(client: ls.LightspeedClient, line_id: str) -> list:
 
 
 def model_from(name: str, brand: str) -> str:
-    """Item name without the leading brand ('Canon EOS R7' -> 'EOS R7')."""
+    """Item name without the leading brand ('Canon EOS R7' -> 'EOS R7') and
+    without a trailing '+', which marks items carrying California's fee in
+    Lightspeed (Ellie, Oct 2026), not part of the model."""
     n = (name or "").strip()
     if brand and n.lower().startswith(brand.lower()):
         n = n[len(brand):].strip(" -")
-    return n
+    return re.sub(r"\s*\++\s*$", "", n)
 
 
 async def sale_bundle(client: ls.LightspeedClient, number: str, ctx: dict) -> dict:

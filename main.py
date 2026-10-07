@@ -1009,6 +1009,8 @@ async def home(request: Request):
         "last_run":     store.get_json("last_run"),
         "last_weekly":  store.get_json("last_weekly"),
         "manager_on":   _make_manager_sheets() is not None,
+        "mack_on":      mk.enabled(),
+        "last_mack_rescan": store.get_json("last_mack_rescan"),
         "next_run":     store.get("next_run", ""),
         "config": {
             "Lightspeed client ID (LIGHTSPEED_CLIENT_ID)":            bool(CLIENT_ID),
