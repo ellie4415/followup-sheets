@@ -12,8 +12,11 @@
  *   - Kits tab: the camera and lens names Mack should get for each kit
  *     (kits seen in the panel are added automatically, blank, to fill in).
  *   - Staff tab: who gets reminder emails.
- *   - Mack menu: make the file for Mack, load past warranties, refresh,
- *     reminders on/off.
+ *   - Mack menu: make the file for Mack, load past warranties, import a
+ *     Forms on Fire export, refresh, reminders on/off.
+ *   - Problems column (Registrations): anything wrong with a row. A row with
+ *     problems is "Needs fixing" and stays out of Mack's file until the
+ *     problem is fixed and the cell is cleared.
  *
  * Install (same steps as the other bridges)
  *   1. Extensions > Apps Script > delete any code > paste this file.
@@ -32,7 +35,7 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 2;
+const VERSION   = 3;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
@@ -54,7 +57,7 @@ MACK_HEADERS.forEach(function (h, i) { M[h] = i; });
 // Ours, starting at AC. Never sent to Mack.
 const TRACK_HEADERS = ['Status', 'Store', 'Salesperson', 'Warranty Sale', 'Warranty Item',
   'Unit Key', 'Customer ID', 'Saved From', 'Saved At', 'Sent to Mack',
-  'Cancelled with Mack', 'Notes', 'Registration ID'];
+  'Cancelled with Mack', 'Notes', 'Registration ID', 'Problems'];
 const T = {};
 TRACK_HEADERS.forEach(function (h, i) { T[h] = MACK_HEADERS.length + i; });
 const REG_WIDTH = MACK_HEADERS.length + TRACK_HEADERS.length;
@@ -81,7 +84,7 @@ const STATUS_COLORS = {
   'Waiting': '#fff2cc', 'Registered': '#d9ead3', 'Ready to send': '#d9ead3',
   'Sent': '#b6d7a8', 'Returned': '#efefef', "Returned, don't send": '#efefef',
   'Cancel with Mack': '#f4cccc', 'Cancelled': '#efefef', 'Handled outside': '#efefef',
-  'Needs WarrType code': '#fce5cd', 'Return: check': '#fce5cd',
+  'Needs WarrType code': '#fce5cd', 'Return: check': '#fce5cd', 'Needs fixing': '#f4cccc', 'Sent, needs fixing': '#f4cccc',
 };
 
 // ── Web app entry points ───────────────────────────────────────────────────
@@ -129,7 +132,8 @@ function onEdit(e) {
   const relevant =
     (name === SOLD_TAB && touches(S['Handled Outside'] + 1)) ||
     (name === REG_TAB && (touches(T['Sent to Mack'] + 1) || touches(T['Cancelled with Mack'] + 1) ||
-                          touches(M['WarrType'] + 1) || touches(T['Unit Key'] + 1))) ||
+                          touches(M['WarrType'] + 1) || touches(T['Unit Key'] + 1) ||
+                          touches(T['Problems'] + 1))) ||
     (name === CODES_TAB && touches(2));
   if (relevant) refreshStatuses();
 }
@@ -142,6 +146,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Load past warranties from Lightspeed', 'loadPastWarranties')
     .addItem('Mark selected rows as registered before this sheet', 'markRegisteredBefore')
+    .addItem('Import a Forms on Fire export', 'importFormsOnFire')
     .addSeparator()
     .addItem('Send reminders now', 'sendReminders')
     .addItem('Turn on daily reminders', 'turnOnReminders')
@@ -390,7 +395,9 @@ function computeStatuses_(sold, regs, codes) {
       if (!sent) return "Returned, don't send";
       return r[T['Cancelled with Mack']] ? 'Cancelled' : 'Cancel with Mack';
     }
-    if (sent) return 'Sent';
+    const problems = String(r[T['Problems']] || '').trim();
+    if (sent) return problems ? 'Sent, needs fixing' : 'Sent';
+    if (problems) return 'Needs fixing';
     const code = String(r[M['WarrType']] || '') || (codes[normItem_(r[T['Warranty Item']])] || {}).code;
     return code ? 'Ready to send' : 'Needs WarrType code';
   });
@@ -506,17 +513,26 @@ function makeMackFile() {
   const regSh = sheet_(REG_TAB);
   const regs = readRows_(regSh, REG_WIDTH);
   const codes = readCodes_();
-  const ready = [], needCode = [], cancel = [];
+  const ready = [], needCode = [], cancel = [], fixing = [];
   regs.forEach(function (r, i) {
     const st = statuses.regs[i];
     if (st === 'Ready to send') ready.push(i);
     else if (st === 'Needs WarrType code') needCode.push(i);
     else if (st === 'Cancel with Mack') cancel.push(i);
+    else if (st === 'Needs fixing') fixing.push(i);
   });
   if (!ready.length) {
     ui.alert('Nothing new to send.' + listNote_(needCode, regs, 'still need a WarrType code on the Codes tab') +
+      listNote_(fixing, regs, 'need fixing first (see their Problems column)') +
       listNote_(cancel, regs, 'were returned after being sent: tell Mack to cancel them'));
     return;
+  }
+  if (fixing.length) {
+    const go = ui.alert('Some warranties need fixing first',
+      fixing.length + ' registration(s) are left out until their Problems cell is fixed and cleared:\n' +
+      fixing.map(function (i) { return '  ' + describeReg_(regs[i]) + ': ' + regs[i][T['Problems']]; }).join('\n') +
+      '\n\nMake the file with the other ' + ready.length + '?', ui.ButtonSet.OK_CANCEL);
+    if (go !== ui.Button.OK) return;
   }
   if (needCode.length) {
     const go = ui.alert('Some warranties are missing a WarrType code',
@@ -560,6 +576,7 @@ function makeMackFile() {
       cancel.map(function (i) { return esc_(describeReg_(regs[i])); }).join('<br>') +
       '<br>Then type the date in the "Cancelled with Mack" column.</p>' : '') +
     (needCode.length ? '<p>Left out until they have a WarrType code: ' + needCode.length + '</p>' : '') +
+    (fixing.length ? '<p>Left out until fixed (Problems column): ' + fixing.length + '</p>' : '') +
     '</div>';
   ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(260), 'File for Mack');
 }
@@ -626,18 +643,20 @@ function sendReminders() {
     sent++;
   });
 
-  const cancel = [], needCode = [];
+  const cancel = [], needCode = [], fixing = [];
   regs.forEach(function (r, i) {
     if (st.regs[i] === 'Cancel with Mack') cancel.push(describeReg_(r));
     if (st.regs[i] === 'Needs WarrType code') needCode.push(String(r[T['Warranty Item']]));
+    if (st.regs[i] === 'Needs fixing') fixing.push(describeReg_(r) + ': ' + r[T['Problems']]);
   });
   const manager = String(settings[0] || '').trim();
-  if (manager && (late.length || urgent.length || cancel.length || needCode.length || check.length)) {
+  if (manager && (late.length || urgent.length || cancel.length || needCode.length || check.length || fixing.length)) {
     const parts = [];
     if (urgent.length) parts.push('URGENT, close to Mack\'s 30-day limit:\n' + bullets_(urgent));
     if (late.length) parts.push('Waiting ' + managerAfter + '+ days:\n' + bullets_(late));
     if (cancel.length) parts.push('Returned after being sent, tell Mack to cancel:\n' + bullets_(cancel));
     if (needCode.length) parts.push('Need a WarrType code on the Codes tab:\n' + bullets_(unique_(needCode)));
+    if (fixing.length) parts.push('Need fixing before they can go to Mack (fix, then clear the Problems cell):\n' + bullets_(fixing));
     if (check.length) parts.push('Returns the sheet could not match to a sale (check the Sold tab):\n' +
       bullets_(check.map(function (r) { return 'Sale ' + r[S['Sale']] + ': ' + r[S['Warranty Item']]; })));
     MailApp.sendEmail(manager, 'Mack warranties: daily check', parts.join('\n\n') + '\n\n' +
@@ -712,6 +731,311 @@ function markRegisteredBefore() {
   ui.alert(marked + ' row(s) marked. Rows that were not Waiting were left alone.');
 }
 
+// ── Forms on Fire import (moving over from the tablet) ─────────────────────
+
+const FOF_SENT_LABEL = 'Sent via Forms on Fire';
+const EMAIL_TYPOS = {
+  'gmai.com': 'gmail.com', 'gmial.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gmal.com': 'gmail.com',
+  'gnail.com': 'gmail.com', 'gmail.co': 'gmail.com', 'gmail.con': 'gmail.com', 'yaho.com': 'yahoo.com',
+  'yahooo.com': 'yahoo.com', 'yahoo.co': 'yahoo.com', 'hotmial.com': 'hotmail.com', 'hotmal.com': 'hotmail.com',
+  'outlok.com': 'outlook.com', 'iclod.com': 'icloud.com', 'icloud.co': 'icloud.com', 'comcast.com': 'comcast.net',
+  'att.com': 'att.net', 'sbcglobal.com': 'sbcglobal.net', 'charter.com': 'charter.net',
+};
+
+function importFormsOnFire() {
+  const ui = menuUi_();
+  const answer = ui.prompt('Import a Forms on Fire export',
+    'Paste the Google Drive link of the export (.csv or Google Sheet).\n\n' +
+    'Or leave this blank to import from the tab that is open now.', ui.ButtonSet.OK_CANCEL);
+  if (answer.getSelectedButton() !== ui.Button.OK) return;
+  let records;
+  try {
+    records = readFofTable_(answer.getResponseText());
+  } catch (err) {
+    ui.alert(String(err && err.message || err));
+    return;
+  }
+  const sent = ui.alert('Already sent to Mack?',
+    'Has Melinda already sent these ' + records.length + ' warranties to Mack from Forms on Fire?\n\n' +
+    'Yes: they are marked "' + FOF_SENT_LABEL + '" and stay out of the next file.\n' +
+    'No: they go into the next file. Rows that need fixing wait until they are fixed.',
+    ui.ButtonSet.YES_NO_CANCEL);
+  if (sent !== ui.Button.YES && sent !== ui.Button.NO) return;
+
+  const out = withLock_(function () {
+    const regSh = sheet_(REG_TAB);
+    const result = fofRegistrations_(records, readRows_(sheet_(SOLD_TAB), SOLD_HEADERS.length),
+      readRows_(regSh, REG_WIDTH), readCodes_(), sent === ui.Button.YES ? FOF_SENT_LABEL : '', new Date());
+    if (result.rows.length) {
+      const start = regSh.getLastRow() + 1;
+      regSh.getRange(start, 1, result.rows.length, REG_WIDTH)
+        .setNumberFormats(result.rows.map(function () { return registrationFormats_(); }))
+        .setValues(result.rows);
+      refreshStatuses_();
+    }
+    return result;
+  });
+
+  function list(title, items, color) {
+    if (!items.length) return '';
+    return '<p style="color:' + (color || '#222') + '"><b>' + title + ' (' + items.length + ')</b><br>' +
+      items.map(esc_).join('<br>') + '</p>';
+  }
+  const html = '<div style="font:13px Arial,sans-serif;line-height:1.45">' +
+    '<p><b>' + out.imported.length + ' imported</b> to the Registrations tab, ' + out.linked +
+    ' matched to their Lightspeed sale on the Sold tab (now marked Registered).</p>' +
+    list('Need fixing before they go to Mack: fix the row, then clear its Problems cell', out.flagged, '#a61c00') +
+    list('Send soon, close to Mack\'s 30-day limit', out.urgent, '#a61c00') +
+    list('Not matched to a sale on the Sold tab (imported anyway)', out.unlinked) +
+    list('Skipped', out.skipped) + '</div>';
+  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(560).setHeight(480), 'Forms on Fire import');
+}
+
+// The export as a list of {header: value}. Text stays text, so serials
+// like "015057" keep their leading zero (a Drive CSV is safest for that).
+function readFofTable_(input) {
+  const text = String(input || '').trim();
+  let values;
+  if (text) {
+    const id = (text.match(/[-\w]{25,}/) || [])[0];
+    if (!id) throw new Error('That does not look like a Google Drive link.');
+    const file = DriveApp.getFileById(id);
+    values = file.getMimeType() === MimeType.GOOGLE_SHEETS
+      ? SpreadsheetApp.openById(id).getSheets()[0].getDataRange().getDisplayValues()
+      : Utilities.parseCsv(file.getBlob().getDataAsString('UTF-8').replace(/^﻿/, ''));
+  } else {
+    values = SpreadsheetApp.getActiveSheet().getDataRange().getDisplayValues();
+  }
+  return fofRecords_(values);
+}
+
+function fofRecords_(values) {
+  const head = (values[0] || []).map(function (h) { return String(h).replace(/^﻿/, '').trim(); });
+  if (head.indexOf('Row Id') < 0 || head.indexOf('DealerInvoice') < 0) {
+    throw new Error('That is not a Forms on Fire Mack export (it has no "Row Id" and "DealerInvoice" columns).');
+  }
+  return values.slice(1).filter(function (r) { return r.join('').trim(); }).map(function (r) {
+    const o = {};
+    head.forEach(function (h, i) { o[h] = String(r[i] === undefined || r[i] === null ? '' : r[i]).trim(); });
+    return o;
+  });
+}
+
+/**
+ * Pure: Forms on Fire records -> Registrations rows. Each record is matched
+ * to its warranty on the Sold tab (receipt number, else the receipt number's
+ * last digits, else same last name within 3 days; ties go to the same price
+ * and coverage) so that sale shows as Registered. Problems are listed in the
+ * row's Problems cell, which holds it out of Mack's file until cleared.
+ */
+function fofRegistrations_(records, sold, regs, codes, sentLabel, now) {
+  const haveIds = {}, regKeys = {}, taken = {};
+  regs.forEach(function (r) {
+    haveIds[String(r[T['Registration ID']])] = true;
+    if (r[T['Unit Key']]) regKeys[String(r[T['Unit Key']])] = true;
+  });
+  const out = { rows: [], imported: [], flagged: [], unlinked: [], skipped: [], urgent: [], linked: 0 };
+  records.forEach(function (f) {
+    const id = 'FoF-' + f['Row Id'];
+    const who = (f['First'] + ' ' + f['Last']).trim() + ', receipt ' + f['DealerInvoice'];
+    if (!f['Row Id']) return;
+    if (haveIds[id]) { out.skipped.push(who + ': already imported'); return; }
+    const match = matchFofUnit_(f, sold, regKeys, taken);
+    if (match && match.duplicate) {
+      out.skipped.push(who + ': this sale is already registered in the sheet');
+      return;
+    }
+    const unit = match;
+    if (unit) { taken[String(unit[S['Unit Key']])] = true; out.linked++; }
+    else out.unlinked.push(who);
+
+    const problems = fofProblems_(f, unit);
+    const years = Number(f['coverageLengthOfTime']) || '';
+    const cov = numVal_(f['coverageAmount']);
+    const item = unit ? String(unit[S['Warranty Item']]) : '';
+    const row = new Array(REG_WIDTH).fill('');
+    row[M['First']] = f['First']; row[M['Last']] = f['Last']; row[M['Company']] = f['Company'];
+    row[M['Address']] = f['Address']; row[M['Address2']] = f['Address2']; row[M['City']] = f['City'];
+    row[M['State']] = f['State']; row[M['Zip']] = f['zip']; row[M['Phone']] = f['phone'];
+    row[M['Email']] = f['email'];
+    row[M['WarrType']] = (item && (codes[normItem_(item)] || {}).code) ||
+      codeForPlan_(codes, years, cov, f['Condition'] || 'New');
+    row[M['EquipmentPurchaseDate']] = f['EquipmentPurchaseDate'];
+    row[M['ServiceContractPurchaseDate']] = f['ServiceContractPurchaseDate'];
+    row[M['EquipmentContractPurchasePrice']] = isNaN(numVal_(f['EquipmentContractPurchasePrice'])) ? '' : numVal_(f['EquipmentContractPurchasePrice']);
+    row[M['EquipmentValue']] = isNaN(numVal_(f['EquipmentValue'])) ? '' : numVal_(f['EquipmentValue']);
+    row[M['Condition']] = f['Condition'] || 'New';
+    row[M['DealerInvoice#']] = f['DealerInvoice'];
+    ['', '2', '3'].forEach(function (n) {
+      row[M['EQ' + n + 'Make']] = f['EQ' + n + 'Make'] || '';
+      row[M['EQ' + n + 'Model']] = f['EQ' + n + 'Model'] || '';
+      row[M['EQ' + n + 'Serial']] = f['EQ' + n + 'Serial'] || '';
+    });
+    const lat = parseFloat(String(f['Completed At'] || ''));
+    row[T['Store']] = unit ? unit[S['Store']] : (lat >= 39.2 ? 'Action Camera Reno' : lat ? 'Action Camera Rocklin' : '');
+    row[T['Salesperson']] = unit ? unit[S['Salesperson']] : f['salesPersonName'];
+    row[T['Warranty Sale']] = unit ? String(unit[S['Sale']]) : '';
+    row[T['Warranty Item']] = item;
+    row[T['Unit Key']] = unit ? String(unit[S['Unit Key']]) : '';
+    row[T['Customer ID']] = unit ? String(unit[S['Customer ID']]) : '';
+    row[T['Saved From']] = 'Forms on Fire';
+    row[T['Saved At']] = parseFofTime_(f['Completed']) || now;
+    row[T['Sent to Mack']] = sentLabel || '';
+    row[T['Notes']] = 'Forms on Fire #' + f['Row Id'] + ': ' + (years ? years + ' yr, ' : '') +
+      (cov ? 'up to ' + money_(cov) + ', ' : '') + 'entered by ' + (f['salesPersonName'] || 'unknown') + '.';
+    row[T['Registration ID']] = id;
+    row[T['Problems']] = problems.join(' ');
+    out.rows.push(row);
+    out.imported.push(who);
+    if (problems.length) out.flagged.push(who + ': ' + problems.join(' '));
+
+    const bought = parseMackDate_(f['EquipmentPurchaseDate']) || parseMackDate_(f['ServiceContractPurchaseDate']);
+    if (!sentLabel && bought) {
+      const deadline = new Date(bought.getTime() + 30 * 86400000);
+      const daysLeft = Math.round((startOfDay_(deadline) - startOfDay_(now)) / 86400000);
+      if (daysLeft <= 7) {
+        out.urgent.push(who + ': bought ' + f['EquipmentPurchaseDate'] + ', Mack\'s 30 days end ' +
+          mmddyyyy_(deadline) + (daysLeft < 0 ? ' (already passed)' : ''));
+      }
+    }
+  });
+  return out;
+}
+
+function matchFofUnit_(f, sold, regKeys, taken) {
+  const inv = String(f['DealerInvoice'] || '').replace(/\D/g, '');
+  const units = sold.filter(function (r) { return Number(r[S['Qty']]) > 0; });
+  const keyOf = function (r) { return String(r[S['Unit Key']]); };
+  const free = function (list) { return list.filter(function (r) { return !regKeys[keyOf(r)] && !taken[keyOf(r)]; }); };
+  const bySale = units.filter(function (r) {
+    const sale = String(r[S['Sale']] || '');
+    return sale.length >= 4 && inv && (sale === inv || (inv.length > sale.length && inv.slice(-sale.length) === sale));
+  });
+  let cands = free(bySale);
+  if (!cands.length && bySale.length && bySale.every(function (r) { return regKeys[keyOf(r)]; })) {
+    return { duplicate: true };
+  }
+  if (!cands.length) {
+    const last = lettersOnly_(f['Last']);
+    const when = parseMackDate_(f['ServiceContractPurchaseDate']) || parseMackDate_(f['EquipmentPurchaseDate']);
+    cands = free(units.filter(function (r) {
+      const words = String(r[S['Customer']] || '').trim().split(/\s+/);
+      const name = lettersOnly_(words[words.length - 1]);
+      const d = r[S['Date']] instanceof Date ? r[S['Date']] : parseMackDate_(String(r[S['Date']]));
+      const sameName = last && name && (name === last || last.slice(-name.length) === name || name.slice(-last.length) === last);
+      return sameName && when && d && Math.abs(startOfDay_(d) - startOfDay_(when)) <= 3 * 86400000;
+    }));
+  }
+  const price = numVal_(f['EquipmentContractPurchasePrice']), cov = numVal_(f['coverageAmount']);
+  const score = function (r) {
+    return (Math.abs(numVal_(r[S['Price']]) - price) < 0.01 ? 2 : 0) +
+      (parsePlan_(String(r[S['Warranty Item']])).coverage === cov ? 1 : 0);
+  };
+  cands.sort(function (a, b) { return score(b) - score(a); });
+  return cands[0] || null;
+}
+
+function fofProblems_(f, unit) {
+  const p = [];
+  const need = [['First', 'first name'], ['Last', 'last name'], ['Address', 'address'], ['City', 'city'],
+    ['State', 'state'], ['zip', 'zip'], ['phone', 'phone'], ['email', 'email'],
+    ['EquipmentPurchaseDate', 'gear purchase date'], ['ServiceContractPurchaseDate', 'warranty purchase date'],
+    ['EquipmentContractPurchasePrice', 'warranty price'], ['EquipmentValue', 'equipment value'],
+    ['DealerInvoice', 'receipt number']];
+  const missing = need.filter(function (n) { return !String(f[n[0]] || '').trim(); })
+    .map(function (n) { return n[1]; });
+  if (missing.length) p.push('Missing ' + missing.join(', ') + '.');
+
+  ['', '2', '3'].forEach(function (n, i) {
+    const make = String(f['EQ' + n + 'Make'] || '').trim(), model = String(f['EQ' + n + 'Model'] || '').trim();
+    const serial = String(f['EQ' + n + 'Serial'] || '').trim();
+    if (!make && !model && !serial) {
+      if (i === 0) p.push('No covered item listed.');
+      return;
+    }
+    if (!make || !model) p.push('Item ' + (i + 1) + ' needs a brand and model.');
+    if (!realSerial_(serial)) p.push('Item ' + (i + 1) + ' has no serial number' + (serial ? ' ("' + serial + '")' : '') + '.');
+  });
+
+  const email = String(f['email'] || '').trim();
+  if (email) {
+    const domain = email.split('@')[1] ? email.split('@')[1].toLowerCase() : '';
+    if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(email)) p.push('Email "' + email + '" looks invalid.');
+    else if (EMAIL_TYPOS[domain]) p.push('Email ends in ' + domain + ', probably a typo for ' + EMAIL_TYPOS[domain] + '.');
+  }
+  const phone = String(f['phone'] || '').replace(/\D/g, '');
+  if (phone && !(phone.length === 10 || (phone.length === 11 && phone.charAt(0) === '1'))) {
+    p.push('Phone "' + f['phone'] + '" does not have 10 digits.');
+  }
+  const zip = String(f['zip'] || '').trim();
+  if (zip && !/^\d{5}(-?\d{4})?$/.test(zip)) p.push('Zip "' + zip + '" looks wrong.');
+
+  const inv = String(f['DealerInvoice'] || '').replace(/\D/g, '');
+  if (inv && (inv.length < 5 || inv.length > 7)) {
+    const sale = unit ? String(unit[S['Sale']]) : '';
+    p.push('Receipt number ' + f['DealerInvoice'] + ' looks wrong' +
+      (sale && sale !== inv ? ', the Lightspeed sale is ' + sale : '') + '.');
+  }
+
+  const value = numVal_(f['EquipmentValue']), price = numVal_(f['EquipmentContractPurchasePrice']);
+  const formCov = numVal_(f['coverageAmount']);
+  const unitCov = unit ? parsePlan_(String(unit[S['Warranty Item']])).coverage : null;
+  const limit = unitCov || formCov;
+  if (limit && value > limit) {
+    p.push('Equipment value ' + money_(value) + ' is above the ' + money_(limit) + ' plan limit' +
+      (String(Math.round(value)) === inv ? ' (it matches the receipt number, probably typed in the wrong box)'
+        : ' (Mack voids a plan sold below the gear\'s price)') + '.');
+  }
+  if (unit && !isNaN(price) && Math.abs(numVal_(unit[S['Price']]) - price) > 0.009) {
+    p.push('Warranty price ' + money_(price) + ' does not match Lightspeed (' + money_(numVal_(unit[S['Price']])) + ').');
+  }
+  if (unit && unitCov && formCov && unitCov !== formCov) {
+    p.push('Form says coverage up to ' + money_(formCov) + ' but Lightspeed sold the ' + unit[S['Warranty Item']] + '.');
+  }
+  const gear = parseMackDate_(f['EquipmentPurchaseDate']), warranty = parseMackDate_(f['ServiceContractPurchaseDate']);
+  if (gear && warranty) {
+    const days = Math.round((startOfDay_(warranty) - startOfDay_(gear)) / 86400000);
+    if (days > 30) p.push('Warranty bought ' + days + ' days after the gear (Mack allows 30).');
+    if (days < 0) p.push('The warranty date is before the gear date.');
+  }
+  return p;
+}
+
+// A WarrType code from the plan's years, coverage and condition, only when
+// the Codes tab has exactly one code for that combination.
+function codeForPlan_(codes, years, coverage, condition) {
+  const found = {};
+  Object.keys(codes).forEach(function (k) {
+    const c = codes[k];
+    if (c.code && c.years === Number(years) && c.coverage === Number(coverage) &&
+        String(c.condition || 'New').toLowerCase() === String(condition || 'New').toLowerCase()) found[c.code] = true;
+  });
+  const list = Object.keys(found);
+  return list.length === 1 ? list[0] : '';
+}
+
+function numVal_(v) {
+  if (typeof v === 'number') return v;
+  const n = parseFloat(String(v || '').replace(/[$,\s]/g, ''));
+  return isNaN(n) ? NaN : n;
+}
+
+function lettersOnly_(s) { return String(s || '').toLowerCase().replace(/[^a-z]/g, ''); }
+
+function money_(n) {
+  return '$' + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function mmddyyyy_(d) {
+  const pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '-' + d.getFullYear();
+}
+
+function parseFofTime_(s) {
+  const m = /^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/.exec(String(s || '').trim());
+  return m ? new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]), Number(m[4] || 0), Number(m[5] || 0)) : null;
+}
+
 // ── Kits ───────────────────────────────────────────────────────────────────
 
 function readKits_() {
@@ -763,7 +1087,10 @@ function realSerial_(s) {
 function readCodes_() {
   const out = {};
   readRows_(sheet_(CODES_TAB), 6).forEach(function (r) {
-    if (r[0]) out[normItem_(r[0])] = { code: String(r[1] || '').trim() };
+    if (r[0]) {
+      out[normItem_(r[0])] = { code: String(r[1] || '').trim(), years: Number(r[2]) || null,
+        coverage: Number(String(r[3]).replace(/[$,\s]/g, '')) || null, condition: String(r[4] || 'New') };
+    }
   });
   return out;
 }
@@ -823,6 +1150,13 @@ function parsePlan_(name) {
 
 function ensureSetup_() {
   const ss = SpreadsheetApp.getActive();
+  const existingReg = ss.getSheetByName(REG_TAB);
+  if (existingReg && !String(existingReg.getRange(1, T['Problems'] + 1).getValue())) {
+    // Sheets made before v3: add the Problems column and its status color.
+    existingReg.getRange(1, T['Problems'] + 1).setValue('Problems').setFontWeight('bold').setBackground('#d9d9d9');
+    existingReg.getRange(2, T['Problems'] + 1, existingReg.getMaxRows() - 1, 1).setNumberFormat('@');
+    statusColors_(existingReg, T['Status'] + 1);
+  }
   if (!ss.getSheetByName(REG_TAB)) {
     const sh = ss.insertSheet(REG_TAB, 0);
     sh.getRange(1, 1, 1, REG_WIDTH).setValues([MACK_HEADERS.concat(TRACK_HEADERS)]).setFontWeight('bold');

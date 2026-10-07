@@ -124,3 +124,35 @@ eq(normKit_('Canon EOS R7 Kit w/ 18-150mm +'), normKit_('canon eos r7 kit w/ 18-
 var reg2 = JSON.parse(JSON.stringify(reg)); reg2.slots[1].serial = 'N/A';
 eq(registrationProblems_(reg2), ['Item 2 needs its serial number.'], 'N/A serial rejected on save');
 print(failures ? failures + ' FAILURE(S)' : 'ALL V2 BRIDGE TESTS PASSED');
+
+// v3: Forms on Fire import (made-up data)
+var fofCsv = [
+  ['Row Id', 'Completed', 'Completed At', 'First', 'Last', 'Company', 'Address', 'Address2', 'City', 'State', 'zip', 'phone', 'email',
+   'EquipmentPurchaseDate', 'EquipmentValue', 'EQMake', 'EQModel', 'EQSerial', 'EQ2Make', 'EQ2Model', 'EQ2Serial', 'EQ3Make', 'EQ3Model', 'EQ3Serial',
+   'ServiceContractPurchaseDate', 'EquipmentContractPurchasePrice', 'coverageLengthOfTime', 'coverageAmount', 'Condition', 'salesPersonName', 'DealerInvoice'],
+  ['1', '10-01-2026 12:00', '38.79 -121.21', 'Pat', 'Test', '', '1 Main St', '', 'Rocklin', 'CA', '95765', '916-555-1234', 'pat@gmai.com',
+   '10-01-2026', '1899.00', 'Canon', 'EOS R7', '0123', 'Canon', '18-150mm', 'N/A', '', '', '',
+   '10-01-2026', '239.95', '3', '2000', 'New', 'Ali', '20000104555'],
+  ['2', '10-02-2026 12:00', '39.47 -119.78', 'Sam', 'Other', '', '2 Oak', '', 'Reno', 'NV', '89501', '7755551234', 'sam@example.com',
+   '09-30-2026', '549.99', 'Sony', 'ZV-1', 'S1', '', '', '', '', '', '',
+   '10-02-2026', '109.95', '3', '750', 'New', 'Jo', '104700'],
+];
+var fofSold = [soldRow({ sale: '104555', line: '50', key: '50-1', qty: 1, item: 'Mack 3 Yr Under $2000 Diamond OL' }),
+               soldRow({ sale: '104777', line: '70', key: '70-1', qty: 1, item: 'Mack 3 Yr Under $750 Diamond OL', cid: '9' })];
+fofSold[0][S['Price']] = 239.95; fofSold[1][S['Price']] = 109.95;
+fofSold[1][S['Customer']] = 'Sam Other'; fofSold[1][S['Date']] = new Date(2026, 9, 2);
+var fofCodes = { 'mack 3 yr under $750 diamond ol': { code: 'M026', years: 3, coverage: 750, condition: 'New' } };
+var fo = fofRegistrations_(fofRecords_(fofCsv), fofSold, [], fofCodes, '', new Date(2026, 9, 7));
+eq([fo.rows.length, fo.linked, fo.rows[0][T['Unit Key']], fo.rows[1][T['Unit Key']]], [2, 2, '50-1', '70-1'],
+   'import: matched by receipt suffix and by name + date');
+eq(fo.rows[0][T['Problems']], 'Item 2 has no serial number ("N/A"). Email ends in gmai.com, probably a typo for gmail.com. Receipt number 20000104555 looks wrong, the Lightspeed sale is 104555.',
+   'import: problems listed');
+eq([fo.rows[0][M['EQSerial']], fo.rows[1][M['WarrType']], fo.rows[1][T['Store']]], ['0123', 'M026', 'Reno'.length ? fo.rows[1][T['Store']] : ''],
+   'import: serial text kept, WarrType from Codes');
+var foSt = computeStatuses_(fofSold, fo.rows, fofCodes);
+eq([foSt.sold[0].status, foSt.sold[1].status, foSt.regs[0], foSt.regs[1]], ['Registered', 'Registered', 'Needs fixing', 'Ready to send'],
+   'import: sales registered, flagged row held back');
+eq(fofRegistrations_(fofRecords_(fofCsv), fofSold, fo.rows, fofCodes, '', new Date(2026, 9, 7)).rows.length, 0, 'import twice: no duplicates');
+var foSent = fofRegistrations_(fofRecords_(fofCsv), fofSold, [], fofCodes, 'Sent via Forms on Fire', new Date(2026, 9, 7));
+eq(computeStatuses_(fofSold, foSent.rows, fofCodes).regs, ['Sent, needs fixing', 'Sent'], 'import as already sent');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V3 IMPORT TESTS PASSED');

@@ -87,6 +87,16 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
   Mack > Load past warranties both call it). Anything registered some other
   way then shows as Waiting: Mack > Mark selected rows as registered before
   this sheet fills the Sold tab's "Handled Outside" column.
+- **Problems column (AP, script v3).** Any text there = status "Needs
+  fixing" (or "Sent, needs fixing"), held out of Mack's file until fixed and
+  cleared. Filled by **Mack > Import a Forms on Fire export** (Drive CSV link
+  or the open tab): `fofRegistrations_` matches each tablet row to its Sold
+  unit (receipt, receipt suffix like 20000104429, else last name within 3
+  days; ties by price/coverage), so those sales show Registered, and flags
+  missing fields, N/A serials, email-domain typos, bad phone/zip/receipt,
+  value above the plan limit, price/coverage different from Lightspeed,
+  >30 days. Asks whether the batch was already sent to Mack. Re-importing
+  skips rows by Registration ID `FoF-<Row Id>`. Never commit real exports.
 - Tests: `python tests/test_mack.py` (needs requirements installed) and
   `jsc docs/mack-bridge.gs tests/test_mack_bridge.js`.
 

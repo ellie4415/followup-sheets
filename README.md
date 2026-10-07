@@ -124,6 +124,12 @@ Setup, in this order:
 7. **Go live.** Tell staff to use Mack in the sidebar instead of the tablet.
    When you're ready for emails, use Mack > Turn on daily reminders.
 
+**Moving over from the tablet:** Mack > Import a Forms on Fire export takes
+a Forms on Fire CSV (paste its Google Drive link). Each row becomes a
+registration linked to its sale on the Sold tab, and anything wrong with a
+row goes in its **Problems** column. Those rows show "Needs fixing" and stay
+out of Mack's file until someone fixes the row and clears the Problems cell.
+
 Updating the script to a newer version of `docs/mack-bridge.gs`: copy
 your `SECRET`, `STAFF_KEY` and `APP_URL` lines first, paste the new file,
 put those three lines back, Ctrl+S, then Deploy > Manage deployments >
