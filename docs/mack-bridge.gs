@@ -500,7 +500,7 @@ function rules_() {
 // ── The weekly file for Mack ───────────────────────────────────────────────
 
 function makeMackFile() {
-  const ui = SpreadsheetApp.getUi();
+  const ui = menuUi_();
   const ss = SpreadsheetApp.getActive();
   const statuses = withLock_(refreshStatuses_);
   const regSh = sheet_(REG_TAB);
@@ -651,7 +651,7 @@ function turnOnReminders() {
   turnOffReminders();
   const hour = Math.min(23, Math.max(0, Number(readSettings_()[1]) || 17));
   ScriptApp.newTrigger('sendReminders').timeBased().everyDays(1).atHour(hour).create();
-  SpreadsheetApp.getUi().alert('Daily reminders are on. They go out around ' + hour + ':00 each day.');
+  tell_(ui_(), 'Daily reminders are on. They go out around ' + hour + ':00 each day.');
 }
 
 function turnOffReminders() {
@@ -663,28 +663,29 @@ function turnOffReminders() {
 // ── Past warranties (moving over from the tablet) ──────────────────────────
 
 function loadPastWarranties() {
-  const ui = SpreadsheetApp.getUi();
-  const answer = ui.prompt('Load past warranties from Lightspeed',
-    'How many days back? (up to 45)\n\nThey land on the Sold tab as Waiting. Warranties already registered on the ' +
-    'tablet: select their rows on the Sold tab, then use Mack > Mark selected rows as registered before this sheet.',
-    ui.ButtonSet.OK_CANCEL);
-  if (answer.getSelectedButton() !== ui.Button.OK) return;
-  const days = Math.min(45, Math.max(1, parseInt(answer.getResponseText(), 10) || 14));
+  const ui = ui_();
+  let days = 14;   // run from the script editor: no prompt, 14 days
+  if (ui) {
+    const answer = ui.prompt('Load past warranties from Lightspeed',
+      'How many days back? (up to 45)\n\nThey land on the Sold tab as Waiting. Warranties already registered on the ' +
+      'tablet: select their rows on the Sold tab, then use Mack > Mark selected rows as registered before this sheet.',
+      ui.ButtonSet.OK_CANCEL);
+    if (answer.getSelectedButton() !== ui.Button.OK) return;
+    days = Math.min(45, Math.max(1, parseInt(answer.getResponseText(), 10) || 14));
+  }
   const res = UrlFetchApp.fetch(APP_URL.replace(/\/$/, '') + '/mack/rescan?days=' + days, {
     method: 'post', headers: { 'X-Mack-Secret': SECRET }, muteHttpExceptions: true,
   });
   let data = {};
   try { data = JSON.parse(res.getContentText()); } catch (err) {}
-  if (data.ok) {
-    ui.alert('Loading the last ' + days + ' days. The warranties appear on the Sold tab in a minute or two.');
-  } else {
-    ui.alert('The follow-up app could not start that: ' + (data.error || 'HTTP ' + res.getResponseCode()) +
+  tell_(ui, data.ok
+    ? 'Loading the last ' + days + ' days. The warranties appear on the Sold tab in a minute or two.'
+    : 'The follow-up app could not start that: ' + (data.error || 'HTTP ' + res.getResponseCode()) +
       '\n\nIf it says a run is in progress, try again in a few minutes.');
-  }
 }
 
 function markRegisteredBefore() {
-  const ui = SpreadsheetApp.getUi();
+  const ui = menuUi_();
   const sh = SpreadsheetApp.getActiveSheet();
   if (sh.getName() !== SOLD_TAB) {
     ui.alert('Go to the Sold tab and select the rows (any cell in each row) first.');
@@ -891,6 +892,22 @@ function statusColors_(sh, col) {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+// Pop-ups only exist when an action starts from the sheet's Mack menu; run
+// from the script editor, getUi() throws.
+function ui_() {
+  try { return SpreadsheetApp.getUi(); } catch (err) { return null; }
+}
+
+function menuUi_() {
+  const ui = ui_();
+  if (!ui) throw new Error('Run this from the Mack menu in the spreadsheet, not from the script editor.');
+  return ui;
+}
+
+function tell_(ui, message) {
+  if (ui) ui.alert(message); else Logger.log(message);
+}
 
 function sheet_(name) { return SpreadsheetApp.getActive().getSheetByName(name); }
 
