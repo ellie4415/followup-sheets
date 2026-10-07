@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import lightspeed as ls
+import mack as mk
 import sheets as sh
 import store
 
@@ -538,6 +539,9 @@ async def run_job(trigger: str) -> dict:
         if manager is not None:
             await manager.ensure_setup()
 
+        mack_on = mk.enabled()
+        mack_units: list = []      # Mack warranty units seen this run (see mack.py)
+
         rows_by_tab: dict = {t: [] for t in sh.STORE_TABS}
         customer_cache: dict = {}
         max_id = cursor
@@ -563,6 +567,12 @@ async def run_job(trigger: str) -> dict:
                         key = f"{ytab} (manager)"
                         summary["added"][key] = summary["added"].get(key, 0) + len(rows)
                         mgr_rows[ytab] = []
+            # Mack units go to the persistent outbox BEFORE the cursor moves
+            # past their sales; sending happens after the run, separately, so
+            # a Mack sheet problem never holds up the two sheets above.
+            if mack_units:
+                mk.outbox_add(mack_units)
+                mack_units.clear()
             if upto > cursor_now:
                 store.set("cursor", str(upto))
                 cursor_now = upto
@@ -592,6 +602,23 @@ async def run_job(trigger: str) -> dict:
                 continue
 
             shop_name = shops.get(str(sale.get("shopID", "")), "")
+            lines = await _lines_for(client, sale)
+            items = _line_items(lines)
+
+            # Mack warranties: every shop, refunds and walk-ins included (a
+            # returned warranty cancels its registration), so this sits
+            # before the shop and refund gates below.
+            if mack_on and any(mk.is_mack(mk.line_name(l)) for l in lines):
+                try:
+                    mcust = await _customer_for(client, sale, customer_cache)
+                    mack_units.extend(mk.sold_units(sale, lines, shop_name, employees, mcust))
+                except ls.AuthExpired:
+                    raise
+                except Exception as exc:
+                    log.warning(f"Mack units for sale {sale_id} failed: {exc}")
+                    summary.setdefault("warnings", []).append(
+                        f"Mack: could not read sale {sale_id} ({exc})")
+
             if shop_name.strip().lower() in settings["skip_shops"]:
                 skip("skipped shop")
                 continue
@@ -610,9 +637,6 @@ async def run_job(trigger: str) -> dict:
 
             customer_id  = str(sale.get("customerID") or "0")
             has_customer = customer_id not in ("", "0")
-
-            lines = await _lines_for(client, sale)
-            items = _line_items(lines)
 
             camera_hit = any(li["qty"] > 0 and _is_camera_line(li, qual_ids, excl_ids)
                              for li in items)
@@ -736,6 +760,15 @@ async def run_job(trigger: str) -> dict:
         # A Sheets failure here leaves the cursor at the last good checkpoint;
         # the sheet-side dedup makes the retry harmless.
         await flush(max_id)
+        if mack_on:
+            try:
+                res = await mk.send_outbox()
+                if res["added"]:
+                    summary["added"]["Mack warranties"] = res["added"]
+            except Exception as exc:
+                log.warning(f"Mack sheet send failed (queued for next run): {exc}")
+                summary.setdefault("warnings", []).append(
+                    f"Mack sheet: {exc} (nothing lost, it retries next run)")
         summary["watching_open_carts"] = len(pending_next)
         summary["fetch_mode"] = "bulk (lines+customer embedded)" if _bulk_relations_ok() else "per-sale"
 
@@ -984,6 +1017,8 @@ async def home(request: Request):
             "or service account)":                                    _sheets_configured(),
             "Manager sheet — optional (MANAGER_WEBAPP_URL + "
             "MANAGER_SECRET)":                                        _make_manager_sheets() is not None,
+            "Mack warranty sheet, optional (MACK_WEBAPP_URL + "
+            "MACK_SECRET)":                                           mk.enabled(),
         },
     })
 
@@ -1135,36 +1170,7 @@ async def debug_sale(number: str):
         shops      = await client.get_shops()
         employees  = await client.get_employees()
 
-        # Ticket number first (what staff/the sheet show) — full tickets are
-        # stored 8 digits ("00096017"), so also try the padded form. This
-        # account can 400 on ticketNumber queries entirely (same family of
-        # quirk as its timestamp filter), so tolerate failures and fall back
-        # to treating the number as a raw saleID.
-        sale = None
-        candidates = [number]
-        if number.isdigit() and len(number) < 8:
-            candidates.append("00" + number.zfill(6))
-        for cand in candidates:
-            try:
-                data  = await client.get("Sale.json", params={"ticketNumber": cand, "limit": 5})
-                found = ls.as_list(data.get("Sale"))
-                if found:
-                    sale = found[0]
-                    break
-            except ls.AuthExpired:
-                raise
-            except Exception:
-                continue
-        if sale is None and number.isdigit():
-            try:
-                data = await client.get(f"Sale/{number}.json")
-                s = data.get("Sale")
-                if isinstance(s, dict) and s:
-                    sale = s
-            except ls.AuthExpired:
-                raise
-            except Exception:
-                pass
+        sale = await client.find_sale(number)   # ticket number, then saleID
         if sale is None:
             return JSONResponse({"error": f"Sale {number!r} not found in Lightspeed"},
                                 status_code=404)
@@ -1270,6 +1276,125 @@ async def debug_sale(number: str):
     except Exception as exc:
         log.exception("debug-sale failed")
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
+# ── Mack warranties (see mack.py) ─────────────────────────────────────────────
+
+_mack_ctx: dict = {}
+MACK_CTX_SECONDS = 600
+
+
+async def _mack_context(client: ls.LightspeedClient) -> dict:
+    """Shops, employees, categories and the camera/lens category IDs, cached
+    for 10 minutes so a lookup at the counter costs only the sale's own calls."""
+    if _mack_ctx and time.time() - _mack_ctx["at"] < MACK_CTX_SECONDS:
+        return _mack_ctx
+    sheet = _make_sheets()
+    await sheet.ensure_setup()
+    settings   = await sheet.read_settings()
+    categories = await client.get_categories()
+    _mack_ctx.update({
+        "at":         time.time(),
+        "shops":      await client.get_shops(),
+        "employees":  await client.get_employees(),
+        "categories": categories,
+        "qual_ids":   ls.category_ids_under(categories, settings["categories"]),
+        "min_camera_price": MIN_CAMERA_PRICE,
+    })
+    return _mack_ctx
+
+
+@app.get("/mack/sale/{number}")
+async def mack_sale(number: str, request: Request):
+    """One receipt for the Chrome extension's Mack review panel. Called by the
+    Mack sheet's script (never by browsers directly) with X-Mack-Secret. The
+    answer holds customer contact details, hence the secret."""
+    given = request.headers.get("X-Mack-Secret", "")
+    if not (mk.MACK_SECRET and secrets.compare_digest(given, mk.MACK_SECRET)):
+        return JSONResponse({"error": "bad secret"}, status_code=403)
+    number = number.strip().lstrip("#")
+    if not number.isdigit() or len(number) > 14:
+        return JSONResponse({"error": "Enter the receipt number (digits only)."}, status_code=400)
+    try:
+        client = await get_client()
+        ctx    = await _mack_context(client)
+        bundle = await mk.sale_bundle(client, number, ctx)
+        return JSONResponse(bundle, status_code=404 if bundle.get("error") else 200)
+    except ls.AuthExpired:
+        return JSONResponse({"error": "The follow-up app lost its Lightspeed connection. "
+                                      "Ask Ellie to reconnect it."}, status_code=503)
+    except Exception as exc:
+        log.exception("mack sale lookup failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
+async def _mack_window_units(client: ls.LightspeedClient, days: int) -> list:
+    """Every Mack unit sold or returned in the last N days."""
+    shops     = await client.get_shops()
+    employees = await client.get_employees()
+    units: list = []
+    cache: dict = {}
+    for sale in await fetch_new_sales(client, 0, window_days=days):
+        if str(sale.get("completed")) != "true" or str(sale.get("voided")) == "true":
+            continue
+        lines = await _lines_for(client, sale)
+        if not any(mk.is_mack(mk.line_name(l)) for l in lines):
+            continue
+        cust = await _customer_for(client, sale, cache)
+        units += mk.sold_units(sale, lines, shops.get(str(sale.get("shopID", "")), ""),
+                               employees, cust)
+    return units
+
+
+@app.get("/mack/preview")
+async def mack_preview(days: int = 7):
+    """Mack warranties Lightspeed shows for the last N days, WITHOUT sending
+    anything. For checking detection against what staff actually sold.
+    No customer details here (like the other debug pages)."""
+    try:
+        client = await get_client()
+        units  = await _mack_window_units(client, min(max(days, 1), 45))
+        return {
+            "days": days, "pattern": mk.MACK_ITEM_PATTERN.pattern, "count": len(units),
+            "units": [{k: u[k] for k in ("date", "store", "sale_id", "item", "price",
+                                         "qty", "salesperson", "key", "reverses")}
+                      for u in units],
+        }
+    except ls.AuthExpired as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:
+        log.exception("mack preview failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
+async def mack_rescan_job(trigger: str) -> dict:
+    days = int(store.get("mack_rescan_days") or 7)
+    summary = {"started": datetime.now(tz=PACIFIC).strftime("%-m/%-d/%Y %-I:%M %p"),
+               "trigger": trigger, "ok": False, "days": days, "error": ""}
+    try:
+        client = await get_client()
+        mk.outbox_add(await _mack_window_units(client, days))
+        summary.update(await mk.send_outbox())
+        summary["ok"] = True
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        log.exception("Mack rescan failed")
+    store.set_json("last_mack_rescan", summary)
+    return summary
+
+
+@app.post("/mack/rescan")
+async def trigger_mack_rescan(days: int = 7):
+    """Re-send the last N days of Mack warranties to the Mack sheet (max 45).
+    Recovery only: units already on the sheet are skipped. Warranties that
+    were registered some other way show as waiting; mark them on the sheet."""
+    if not mk.enabled():
+        return JSONResponse({"ok": False, "error": "The Mack sheet is not configured"}, status_code=400)
+    if _job_lock.locked():
+        return JSONResponse({"ok": False, "error": "A run is already in progress"}, status_code=409)
+    store.set("mack_rescan_days", str(min(max(days, 1), 45)))
+    asyncio.create_task(_guarded(mack_rescan_job, "mack rescan", "last_mack_rescan"))
+    return {"ok": True}
 
 
 @app.get("/auth")

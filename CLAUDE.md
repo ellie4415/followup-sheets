@@ -40,6 +40,49 @@ The same poll feeds two spreadsheets:
 Both dedup by sale ID; the cursor advances only after BOTH sheets' appends
 succeed, so a failure on either retries the whole batch harmlessly.
 
+3. **Mack warranty sheet (Oct 2026)**, see the section below. Unlike the two
+   above it can NEVER hold up the cursor.
+
+## Mack warranties (Oct 2026): replaces the Forms on Fire tablet form
+
+Pieces: `mack.py` (detection + receipt bundle), `docs/mack-bridge.gs` (the
+Mack sheet's script: statuses, Melinda's weekly file, reminders, the
+extension's API), and the Chrome extension `~/retail-sidebar-toolkit/edited`
+(`mack.js`, `mack-rules.js`, background.js `MACK_REQUEST`). Data path for the
+review panel: extension -> Mack sheet web app (STAFF_KEY) -> `GET
+/mack/sale/{n}` here (header `X-Mack-Secret` = MACK_SECRET) -> Lightspeed. The
+extension never talks to Railway directly (no new Chrome host permission =
+no re-approval prompt on the store computers) and never holds Lightspeed keys.
+
+- **Units.** One per warranty: `<saleLineID>-<n>` sold, `R<saleLineID>-<n>`
+  returned (`reverses` = SaleLine.parentSaleLineID). Detected for EVERY shop,
+  refunds and walk-ins included, so the hook sits BEFORE the shop/refund
+  gates in `run_job`. Item match: `MACK_ITEM_PATTERN` (default `^\s*mack\b`).
+- **Isolation (must not regress).** Units go to the SQLite outbox
+  (`mack_outbox`) inside `flush()` BEFORE the cursor moves; `send_outbox()`
+  runs after the final flush in its own try/except and only warns. A dead
+  Mack sheet never stops the follow-up/manager sheets; units retry next run.
+  The sheet dedups by unit key. `_lines_for` now runs before the shop gate
+  (free in bulk mode; in per-sale fallback mode it adds a call for skipped
+  shops).
+- **Statuses live in the sheet** (`computeStatuses_`, pure, tested with
+  jsc). A return cancels the unit whose line it reverses, else same customer
+  + same item; it prefers an unsent, then unregistered twin. Registration
+  rows: Ready to send / Needs WarrType code / Sent / Returned, don't send /
+  Cancel with Mack / Cancelled.
+- **Registrations tab = Melinda's Mack file layout**, A..AB exactly
+  (28 columns, tab name in the export `API  use dates or po#` with TWO
+  spaces), tracking columns from AC. DealerInvoice# = the GEAR's receipt
+  (Ellie, Oct 7 2026: the gear's transaction ID is what matters when the
+  warranty is bought later). WarrType codes are filled by Melinda on the
+  Codes tab; rows without one are held out of the file.
+- `/mack/preview?days=N` lists detected units with no customer details;
+  `/mack/rescan?days=N` re-sends a window (recovery only: anything registered
+  some other way then shows as Waiting; mark it in the Sold tab's
+  "Handled Outside" column).
+- Tests: `python tests/test_mack.py` (needs requirements installed) and
+  `jsc docs/mack-bridge.gs tests/test_mack_bridge.js`.
+
 **Sales of the Week (manager sheet, Sept 2026):** `weekly_job` runs after
 the last sync of WEEKLY_DAY (Thursday, 8 PM) and via POST /weekly. It
 scans ALL transactions of the past 7 days (no camera/threshold filter),
@@ -121,7 +164,8 @@ under a qualifying category root OR total ≥ threshold).
 | `main.py` | Routes, OAuth flow, the run job, daily scheduler |
 | `lightspeed.py` | R-Series client (GET-only, paced, 429-aware), category tree logic, contact parsing |
 | `sheets.py` | Two Sheets backends, same interface: `BridgeSheets` (Apps Script web app in the sheet, shared-secret auth — the deployed route; Google org policy blocked service-account key creation July 2026) and `Sheets` (service-account REST, fallback). Bridge script: `docs/sheets-bridge.gs`; POSTs to Apps Script 302-redirect, so `follow_redirects=True` is required. |
-| `store.py` | SQLite key/value on the Railway volume: `tokens`, `cursor`, `last_run` |
+| `store.py` | SQLite key/value on the Railway volume: `tokens`, `cursor`, `last_run`, `mack_outbox` |
+| `mack.py` | Mack warranty units for the hourly run + the receipt bundle for the extension's review panel |
 | `templates/index.html` | Status page: connection, config checklist, Run now, last-run summary |
 
 State keys: `tokens` (JSON: access/refresh/account_id), `cursor` (max

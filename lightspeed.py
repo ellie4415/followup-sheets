@@ -246,6 +246,42 @@ class LightspeedClient:
             log.warning(f"get_customer_credit({customer_id}): {exc}")
             return {}
 
+    async def find_sale(self, number: str) -> Optional[dict]:
+        """A sale by ticket number or saleID, None when neither matches.
+
+        Ticket number first (what staff/the sheet show) — full tickets are
+        stored 8 digits ("00096017"), so also try the padded form. This
+        account can 400 on ticketNumber queries entirely (same family of
+        quirk as its timestamp filter), so tolerate failures and fall back
+        to treating the number as a raw saleID."""
+        number = (number or "").strip()
+        candidates = [number]
+        if number.isdigit() and len(number) < 8:
+            candidates.append("00" + number.zfill(6))
+        for cand in candidates:
+            try:
+                data  = await self.get("Sale.json", params={"ticketNumber": cand, "limit": 5})
+                found = as_list(data.get("Sale"))
+                if found:
+                    return found[0]
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 401:
+                    raise
+            except Exception:
+                continue
+        if number.isdigit():
+            try:
+                data = await self.get(f"Sale/{number}.json")
+                s = data.get("Sale")
+                if isinstance(s, dict) and s:
+                    return s
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 401:
+                    raise
+            except Exception:
+                pass
+        return None
+
     async def get_customer(self, customer_id: str) -> dict:
         for lr in ('["Contact"]', None):
             try:

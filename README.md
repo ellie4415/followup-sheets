@@ -82,6 +82,45 @@ has its own Date-cell color (use "Filter by color" to view one month), and
 each store gets a fresh tab per year ("Reno 2026" → "Reno 2027"),
 created automatically on the first sale of the new year.
 
+## Mack warranty sheet (optional third output, Oct 2026)
+
+Replaces the Forms on Fire tablet form. Every hour the app logs each Mack
+warranty sold or returned to a "Mack Warranties" spreadsheet. Staff register
+each one from **Mack** in the Lightspeed sidebar (the Action Camera Sidebar
+Toolkit extension, 0.13.0+), which fills in the customer, gear and most
+serial numbers from Lightspeed. Melinda makes the weekly file for Mack from
+the sheet's **Mack** menu, in the same columns as her current file.
+
+Setup, in this order:
+
+1. **Spreadsheet.** Create a new blank Google Sheet named "Mack Warranties"
+   (it holds customer contact details: share it with managers only). The
+   account that deploys the script is the one reminder emails come from.
+2. **Script.** Extensions > Apps Script > paste
+   [`docs/mack-bridge.gs`](docs/mack-bridge.gs). Fill in `SECRET` and
+   `STAFF_KEY` (two different long random strings) and check `APP_URL`.
+   Press Ctrl+S (Cmd+S). Deploy > New deployment > Web app > Execute as: Me >
+   Who has access: Anyone > Deploy, and approve the permissions. Copy the
+   `/exec` URL. Reload the spreadsheet: the tabs and the **Mack** menu appear.
+3. **Railway.** Set `MACK_WEBAPP_URL` (the /exec URL) and `MACK_SECRET` (the
+   same value as `SECRET`). The app redeploys; the home page checklist shows
+   the Mack sheet as configured.
+4. **Check detection.** Open `/mack/preview?days=14` on the app and compare
+   it with the Mack warranties staff actually sold in the last two weeks.
+5. **Fill in the sheet.** Codes tab: the WarrType code for each warranty
+   item (new items appear on their own, highlighted until coded). Staff tab:
+   an email for each salesperson. Settings tab: the manager email for the
+   daily summary.
+6. **Extension.** Upload 0.13.0 to the Chrome Web Store. Once it's on the
+   store computers, open its settings: paste the /exec URL as the Mack sheet
+   address and `STAFF_KEY` as the Mack key (Chrome sync copies both to every
+   computer), then set "This computer's store" on each computer.
+7. **Go live.** Tell staff to use Mack in the sidebar instead of the tablet.
+   When you're ready for emails, use Mack > Turn on daily reminders.
+
+Every later edit to the script: Ctrl+S first, then Deploy > Manage
+deployments > pencil > Version: New version > Deploy.
+
 ## Env vars
 
 | Variable | Purpose |
@@ -90,6 +129,8 @@ created automatically on the first sale of the new year.
 | `LIGHTSPEED_CLIENT_ID` / `LIGHTSPEED_CLIENT_SECRET` | This app's own OAuth client |
 | `SHEETS_WEBAPP_URL` / `SHEETS_SECRET` | Apps Script bridge URL + shared secret (preferred route) |
 | `MANAGER_WEBAPP_URL` / `MANAGER_SECRET` | Manager performance sheet bridge (optional) |
+| `MACK_WEBAPP_URL` / `MACK_SECRET` | Mack warranty sheet (optional; see above) |
+| `MACK_ITEM_PATTERN` | Regex for Mack warranty item names (default `^\s*mack\b`) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` / `SHEET_ID` | Service-account fallback route |
 | `DATA_DIR` | Volume mount path (`/data` on Railway) |
 | `RUN_HOURS_START` / `RUN_HOURS_END` | Hourly-sync window, Pacific hours (default 8–20) |
