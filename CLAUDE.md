@@ -87,6 +87,11 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
   Mack > Load past warranties both call it). Anything registered some other
   way then shows as Waiting: Mack > Mark selected rows as registered before
   this sheet fills the Sold tab's "Handled Outside" column.
+- **Gear bought somewhere else** (panel's third gear option, Oct 7 2026):
+  staff type the items, the seller, their receipt/order number and date,
+  and confirm a copy of the original receipt is kept. DealerInvoice# = OUR
+  warranty receipt, OriginalInvoiceNumber = their number (a guess pending
+  Mack's confirmation; one line in registrationRow_ / the panel's save).
 - **Problems column (AP, script v3).** Any text there = status "Needs
   fixing" (or "Sent, needs fixing"), held out of Mack's file until fixed and
   cleared. Filled by **Mack > Import a Forms on Fire export** (Drive CSV link

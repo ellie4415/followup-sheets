@@ -156,3 +156,13 @@ eq(fofRegistrations_(fofRecords_(fofCsv), fofSold, fo.rows, fofCodes, '', new Da
 var foSent = fofRegistrations_(fofRecords_(fofCsv), fofSold, [], fofCodes, 'Sent via Forms on Fire', new Date(2026, 9, 7));
 eq(computeStatuses_(fofSold, foSent.rows, fofCodes).regs, ['Sent, needs fixing', 'Sent'], 'import as already sent');
 print(failures ? failures + ' FAILURE(S)' : 'ALL V3 IMPORT TESTS PASSED');
+
+// Gear bought somewhere else
+var outsideReg = JSON.parse(JSON.stringify(reg));
+outsideReg.outside = true; outsideReg.gear_sale = '130'; outsideReg.original_invoice = 'CANON-4005469098'; outsideReg.gear_date = '10-01-2026';
+var oRow = registrationRow_(outsideReg, codes, 'zz', 'NOW');
+eq([oRow[M['DealerInvoice#']], oRow[M['OriginalInvoiceNumber']], oRow[M['EquipmentPurchaseDate']]], ['130', 'CANON-4005469098', '10-01-2026'],
+   'outside gear: our receipt is DealerInvoice#, theirs is OriginalInvoiceNumber');
+outsideReg.original_invoice = '';
+eq(registrationProblems_(outsideReg), ['The receipt or order number from where the gear was bought is missing.'], 'outside gear needs their receipt number');
+print(failures ? failures + ' FAILURE(S)' : 'ALL OUTSIDE-GEAR TESTS PASSED');

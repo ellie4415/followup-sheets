@@ -242,6 +242,9 @@ function registrationProblems_(reg) {
     if (!realSerial_(s.serial)) out.push('Item ' + (i + 1) + ' needs its serial number.');
   });
   if (!reg.gear_sale) out.push('The gear receipt number is missing.');
+  if (reg.outside && !String(reg.original_invoice || '').trim()) {
+    out.push('The receipt or order number from where the gear was bought is missing.');
+  }
   if (!reg.gear_date || !reg.warranty_date) out.push('A purchase date is missing.');
   if (!(Number(reg.value) > 0)) out.push('The equipment value is missing.');
   return out;
@@ -267,6 +270,9 @@ function registrationRow_(reg, codes, id, now) {
   row[M['EquipmentValue']] = Math.round(Number(reg.value) * 100) / 100;
   row[M['Condition']] = reg.condition || 'New';
   row[M['DealerInvoice#']] = String(reg.gear_sale || '');
+  // Gear bought somewhere else: DealerInvoice# is our warranty receipt and
+  // the other seller's receipt/order number goes here.
+  row[M['OriginalInvoiceNumber']] = String(reg.original_invoice || '');
   (reg.slots || []).slice(0, 3).forEach(function (s, i) {
     const p = i === 0 ? 'EQ' : 'EQ' + (i + 1);
     row[M[p + 'Make']] = s.make || '';
