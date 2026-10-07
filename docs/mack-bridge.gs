@@ -135,6 +135,7 @@ function onEdit(e) {
 }
 
 function onOpen() {
+  ensureSetup_();   // new tabs (like Kits) appear as soon as the sheet opens
   SpreadsheetApp.getUi().createMenu('Mack')
     .addItem('Make the file for Mack', 'makeMackFile')
     .addItem('Refresh statuses', 'refreshStatuses')
