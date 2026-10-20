@@ -207,3 +207,51 @@ var saveReg = JSON.parse(JSON.stringify(reg)); saveReg.key = '9-1';
 var saved = register_(saveReg);
 eq([saved.ok, logged.length > 0], [true, true], 'a save whose status refresh fails is still reported as saved, and logged');
 print(failures ? failures + ' FAILURE(S)' : 'ALL V4 WAITING-LIST TESTS PASSED');
+
+// v5: a tab turned into a Sheets table (typed columns) can't break saving,
+// and making Mack's file never leaves warranties half-marked as sent.
+var typedError = new Error("Exception: You can't set the number format of cells in a typed column.");
+var swallowed = true;
+try { tryFormat_(function () { throw typedError; }); } catch (err) { swallowed = false; }
+eq(swallowed, true, 'typed-column format errors are skipped');
+var other = null;
+try { tryFormat_(function () { throw new Error('Service unavailable'); }); } catch (err) { other = err.message; }
+eq(other, 'Service unavailable', 'other errors still stop the work');
+
+sheet_ = function (name) {
+  return { name: name, getLastRow: function () { return (fakeTabs[name] || []).length + 1; },
+    getRange: function () {
+      var r = fakeRange();
+      r.setNumberFormats = function () { throw typedError; };
+      r.setNumberFormat = function () { throw typedError; };
+      return r;
+    } };
+};
+refreshFails = false; refreshes = 0; logged = []; fakeTabs[REG_TAB] = [];
+var typedSave = JSON.parse(JSON.stringify(reg)); typedSave.key = '9-1';
+var typedResult = register_(typedSave);
+eq([typedResult.ok, refreshes, logged.length], [true, 1, 0], 'saving into a table: saved, statuses refreshed, no error');
+
+// markSent_: the 3rd row refuses its value -> rows 1 and 2 are put back.
+function cellSheet(failRow) {
+  var cells = {};
+  return { cells: cells, getRange: function (row, col) {
+    var key = row + ':' + col;
+    return { setNumberFormat: function () { throw typedError; },
+             setValue: function (v) {
+               if (row === failRow && col === T['Sent to Mack'] + 1 && v === '10-20-2026') throw new Error('value does not match the column type');
+               cells[key] = v; return this; } };
+  } };
+}
+var markRegs = [regRow({ key: '1-1' }), regRow({ key: '2-1' }), regRow({ key: '3-1' })];
+markRegs[0][T['Sent to Mack']] = false; markRegs[1][T['Sent to Mack']] = '';
+var markRows = markRegs.map(function () { var r = new Array(MACK_HEADERS.length).fill(''); r[M['WarrType']] = 'M029'; return r; });
+var sentCol = T['Sent to Mack'] + 1;
+var failing = cellSheet(4);   // sheet row 4 = third registration
+var markErr = markSent_(failing, markRegs, [0, 1, 2], markRows, '10-20-2026');
+eq([!!markErr, failing.cells['2:' + sentCol], failing.cells['3:' + sentCol]], [true, false, ''],
+   'a failed mark puts the earlier rows back the way they were');
+var working = cellSheet(-1);
+eq([markSent_(working, markRegs, [0, 1, 2], markRows, '10-20-2026'), working.cells['4:' + sentCol]], [null, '10-20-2026'],
+   'all rows marked when nothing fails');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V5 TABLE TESTS PASSED');

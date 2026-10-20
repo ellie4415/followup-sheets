@@ -35,7 +35,7 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 4;
+const VERSION   = 5;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
@@ -186,8 +186,8 @@ function addSold_(units) {
     // Live day count: the formula keeps counting between refreshes.
     sh.getRange(start, S['Days Waiting'] + 1, rows.length, 1)
       .setFormulaR1C1('=IF(RC[-1]="Waiting",INT(TODAY()-RC[1]),"")');
-    sh.getRange(start, S['Date'] + 1, rows.length, 1).setNumberFormat('mm-dd-yyyy');
-    sh.getRange(start, S['Price'] + 1, rows.length, 1).setNumberFormat('"$"0.00');
+    tryFormat_(function () { sh.getRange(start, S['Date'] + 1, rows.length, 1).setNumberFormat('mm-dd-yyyy'); });
+    tryFormat_(function () { sh.getRange(start, S['Price'] + 1, rows.length, 1).setNumberFormat('"$"0.00'); });
     addNewCodesAndStaff_(units);
     refreshStatuses_();
   }
@@ -221,7 +221,7 @@ function register_(reg) {
   const row = registrationRow_(reg, codes, id, new Date());
   const start = regSh.getLastRow() + 1;
   regSh.getRange(start, 1, 1, REG_WIDTH).setValues([row]);
-  regSh.getRange(start, 1, 1, REG_WIDTH).setNumberFormats([registrationFormats_()]);
+  tryFormat_(function () { regSh.getRange(start, 1, 1, REG_WIDTH).setNumberFormats([registrationFormats_()]); });
   // The registration is saved at this point. If the bookkeeping below fails,
   // don't report the save as failed (staff would try again and hit "already
   // registered"): the waiting list works statuses out live (pending_) and
@@ -593,13 +593,23 @@ function makeMackFile() {
   out.autoResizeColumns(1, MACK_HEADERS.length);
   moveToFolder_(file.getId(), String(readSettings_()[8] || 'Mack files'));
 
+  let markError = null;
   withLock_(function () {
-    ready.forEach(function (i, k) {
-      regSh.getRange(i + 2, T['Sent to Mack'] + 1).setNumberFormat('@').setValue(today);
-      regSh.getRange(i + 2, M['WarrType'] + 1).setValue(rows[k][M['WarrType']]);
-    });
+    markError = markSent_(regSh, regs, ready, rows, today);
     refreshStatuses_();
   });
+  if (markError) {
+    // Unmarked, this file would go to Mack again next time: remove it so
+    // trying again is always safe.
+    DriveApp.getFileById(file.getId()).setTrashed(true);
+    ui.alert('The file for Mack was not made',
+      'The sheet could not mark these warranties as sent, so the new file was deleted and nothing changed.\n\n' +
+      'Error: ' + String(markError && markError.message || markError) + '\n\n' +
+      'If the Registrations tab was turned into a table, open the table menu (the arrow next to the table name) ' +
+      'and choose "Revert to unformatted data". If the Sent to Mack column has checkboxes, select those cells ' +
+      'and press Delete to remove them. Then try again.', ui.ButtonSet.OK);
+    return;
+  }
 
   const url = 'https://docs.google.com/spreadsheets/d/' + file.getId();
   const html = '<div style="font:14px Arial,sans-serif;line-height:1.5">' +
@@ -613,6 +623,27 @@ function makeMackFile() {
     (fixing.length ? '<p>Left out until fixed (Problems column): ' + fixing.length + '</p>' : '') +
     '</div>';
   ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(260), 'File for Mack');
+}
+
+// Marks the warranties in Mack's file as sent. If one can't be marked, the
+// ones already marked are put back, so nothing looks sent that wasn't.
+function markSent_(regSh, regs, ready, rows, today) {
+  const marked = [];
+  try {
+    ready.forEach(function (i, k) {
+      const cell = regSh.getRange(i + 2, T['Sent to Mack'] + 1);
+      tryFormat_(function () { cell.setNumberFormat('@'); });
+      cell.setValue(today);
+      marked.push(i);
+      regSh.getRange(i + 2, M['WarrType'] + 1).setValue(rows[k][M['WarrType']]);
+    });
+    return null;
+  } catch (err) {
+    marked.forEach(function (i) {
+      regSh.getRange(i + 2, T['Sent to Mack'] + 1).setValue(regs[i][T['Sent to Mack']]);
+    });
+    return err;
+  }
 }
 
 function listNote_(idx, regs, what) {
@@ -802,9 +833,9 @@ function importFormsOnFire() {
       readRows_(regSh, REG_WIDTH), readCodes_(), sent === ui.Button.YES ? FOF_SENT_LABEL : '', new Date());
     if (result.rows.length) {
       const start = regSh.getLastRow() + 1;
-      regSh.getRange(start, 1, result.rows.length, REG_WIDTH)
-        .setNumberFormats(result.rows.map(function () { return registrationFormats_(); }))
-        .setValues(result.rows);
+      const range = regSh.getRange(start, 1, result.rows.length, REG_WIDTH);
+      tryFormat_(function () { range.setNumberFormats(result.rows.map(function () { return registrationFormats_(); })); });
+      range.setValues(result.rows);
       refreshStatuses_();
     }
     return result;
@@ -1188,7 +1219,7 @@ function ensureSetup_() {
   if (existingReg && !String(existingReg.getRange(1, T['Problems'] + 1).getValue())) {
     // Sheets made before v3: add the Problems column and its status color.
     existingReg.getRange(1, T['Problems'] + 1).setValue('Problems').setFontWeight('bold').setBackground('#d9d9d9');
-    existingReg.getRange(2, T['Problems'] + 1, existingReg.getMaxRows() - 1, 1).setNumberFormat('@');
+    tryFormat_(function () { existingReg.getRange(2, T['Problems'] + 1, existingReg.getMaxRows() - 1, 1).setNumberFormat('@'); });
     statusColors_(existingReg, T['Status'] + 1);
   }
   if (!ss.getSheetByName(REG_TAB)) {
@@ -1278,6 +1309,18 @@ function tell_(ui, message) {
 }
 
 function sheet_(name) { return SpreadsheetApp.getActive().getSheetByName(name); }
+
+// Number formats are cosmetic (money, dates, keep-as-text). A tab turned
+// into a Sheets table refuses them on its typed columns ("You can't set the
+// number format of cells in a typed column"): skip them there instead of
+// failing a save. Any other error still stops the work.
+function tryFormat_(apply) {
+  try {
+    apply();
+  } catch (err) {
+    if (!/typed column/i.test(String(err && err.message || err))) throw err;
+  }
+}
 
 function readRows_(sh, width) {
   const last = sh.getLastRow();
