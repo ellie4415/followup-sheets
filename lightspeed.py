@@ -14,6 +14,7 @@ Hard-won lessons carried over from lab-sync (July 2026):
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import logging
 import secrets
@@ -128,6 +129,24 @@ class LightspeedClient:
     def __init__(self, access_token: str, account_id: str):
         self.access_token = access_token
         self.account_id   = account_id
+        self._http: Optional[httpx.AsyncClient] = None
+
+    @contextlib.asynccontextmanager
+    async def pooled(self, pace: Optional[float] = None):
+        """Share one keep-alive connection for a burst of requests (a receipt
+        lookup at the counter) instead of dialing Lightspeed for every call,
+        optionally with a different pacing delay. Batch runs don't use this."""
+        transport = httpx.AsyncHTTPTransport(retries=2)
+        async with httpx.AsyncClient(transport=transport, timeout=30) as http:
+            default_pace = self.PACE_SECONDS
+            self._http = http
+            if pace is not None:
+                self.PACE_SECONDS = pace
+            try:
+                yield self
+            finally:
+                self._http = None
+                self.PACE_SECONDS = default_pace
 
     @property
     def _headers(self) -> dict:
@@ -146,9 +165,13 @@ class LightspeedClient:
         for attempt in range(4):
             await asyncio.sleep(self.PACE_SECONDS)
             try:
-                async with httpx.AsyncClient() as http:
-                    r = await http.get(url, headers=self._headers,
-                                       params=params, timeout=30)
+                if self._http is not None:
+                    r = await self._http.get(url, headers=self._headers,
+                                             params=params, timeout=30)
+                else:
+                    async with httpx.AsyncClient() as http:
+                        r = await http.get(url, headers=self._headers,
+                                           params=params, timeout=30)
                 if r.status_code == 429:
                     wait = float(r.headers.get("Retry-After") or 2)
                     log.warning(f"429 from Lightspeed, sleeping {wait}s (attempt {attempt + 1})")
@@ -253,33 +276,36 @@ class LightspeedClient:
         stored 8 digits ("00096017"), so also try the padded form. This
         account can 400 on ticketNumber queries entirely (same family of
         quirk as its timestamp filter), so tolerate failures and fall back
-        to treating the number as a raw saleID."""
+        to treating the number as a raw saleID.
+
+        All the lookups go out at once (each is a full round trip), and the
+        answer still prefers a ticket match, then the padded ticket, then
+        the saleID."""
         number = (number or "").strip()
         candidates = [number]
         if number.isdigit() and len(number) < 8:
             candidates.append("00" + number.zfill(6))
-        for cand in candidates:
-            try:
-                data  = await self.get("Sale.json", params={"ticketNumber": cand, "limit": 5})
-                found = as_list(data.get("Sale"))
-                if found:
-                    return found[0]
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 401:
-                    raise
-            except Exception:
-                continue
+
+        async def by_ticket(cand: str) -> Optional[dict]:
+            data  = await self.get("Sale.json", params={"ticketNumber": cand, "limit": 5})
+            found = as_list(data.get("Sale"))
+            return found[0] if found else None
+
+        async def by_sale_id() -> Optional[dict]:
+            data = await self.get(f"Sale/{number}.json")
+            s = data.get("Sale")
+            return s if isinstance(s, dict) and s else None
+
+        lookups = [by_ticket(cand) for cand in candidates]
         if number.isdigit():
-            try:
-                data = await self.get(f"Sale/{number}.json")
-                s = data.get("Sale")
-                if isinstance(s, dict) and s:
-                    return s
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 401:
-                    raise
-            except Exception:
-                pass
+            lookups.append(by_sale_id())
+        results = await asyncio.gather(*lookups, return_exceptions=True)
+        for result in results:
+            if isinstance(result, httpx.HTTPStatusError) and result.response.status_code == 401:
+                raise result
+        for result in results:
+            if isinstance(result, dict) and result:
+                return result
         return None
 
     async def get_customer(self, customer_id: str) -> dict:

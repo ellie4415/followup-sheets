@@ -166,3 +166,44 @@ eq([oRow[M['DealerInvoice#']], oRow[M['OriginalInvoiceNumber']], oRow[M['Equipme
 outsideReg.original_invoice = '';
 eq(registrationProblems_(outsideReg), ['The receipt or order number from where the gear was bought is missing.'], 'outside gear needs their receipt number');
 print(failures ? failures + ' FAILURE(S)' : 'ALL OUTSIDE-GEAR TESTS PASSED');
+
+// v4: the waiting list works statuses out live, and a failed status refresh
+// after a save can't leave a registered warranty "outstanding".
+var fakeTabs = {}, written = [], logged = [], refreshes = 0, refreshFails = false;
+function fakeRange() {
+  return { setValues: function (v) { written.push(v); return this; }, setNumberFormats: function () { return this; },
+           insertCheckboxes: function () { return this; }, setValue: function () { return this; } };
+}
+sheet_ = function (name) {
+  return { name: name, getLastRow: function () { return (fakeTabs[name] || []).length + 1; }, getRange: fakeRange };
+};
+readRows_ = function (sh) { return fakeTabs[sh.name] || []; };
+readCodes_ = function () { return codes; };
+refreshStatuses_ = function () { refreshes++; if (refreshFails) throw new Error('validation rule on the Status column'); };
+LockService = { getScriptLock: function () {
+  return { tryLock: function () { return true; }, waitLock: function () {}, releaseLock: function () {} }; } };
+Utilities = { formatDate: function () { return '10-20-2026'; }, getUuid: function () { return 'abcd1234-0000'; } };
+Session = { getScriptTimeZone: function () { return 'America/Los_Angeles'; } };
+console = { error: function (m) { logged.push(m); }, log: function () {} };
+
+var soldNow = [soldRow({ sale: '201', line: '9', key: '9-1', qty: 1 }), soldRow({ sale: '202', line: '10', key: '10-1', qty: 1 })];
+soldNow[0][S['Status']] = 'Waiting'; soldNow[1][S['Status']] = 'Waiting';   // both stored as Waiting...
+fakeTabs[SOLD_TAB] = soldNow;
+fakeTabs[REG_TAB] = [regRow({ key: '10-1' })];                           // ...but 10-1 is registered
+var waitingNow = pending_('');
+eq(waitingNow.waiting.map(function (w) { return w.key; }), ['9-1'], 'registered warranty leaves the waiting list even if its Status cell is stale');
+eq(refreshes, 1, 'stale Status cells get fixed');
+soldNow[1][S['Status']] = 'Registered'; refreshes = 0;
+pending_('');
+eq(refreshes, 0, 'no sheet writes when the Status column is already right');
+
+refreshFails = true; refreshes = 0;
+pending_('');
+soldNow[1][S['Status']] = 'Waiting';
+eq(pending_('').waiting.length, 1, 'waiting list still answers when fixing the Status cells fails');
+
+fakeTabs[REG_TAB] = []; logged = [];
+var saveReg = JSON.parse(JSON.stringify(reg)); saveReg.key = '9-1';
+var saved = register_(saveReg);
+eq([saved.ok, logged.length > 0], [true, true], 'a save whose status refresh fails is still reported as saved, and logged');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V4 WAITING-LIST TESTS PASSED');

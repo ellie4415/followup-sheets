@@ -54,6 +54,17 @@ review panel: extension -> Mack sheet web app (STAFF_KEY) -> `GET
 extension never talks to Railway directly (no new Chrome host permission =
 no re-approval prompt on the store computers) and never holds Lightspeed keys.
 
+- **Lookup speed (Oct 20 2026).** Staff wait on `/mack/sale/{n}`, so: the
+  shops/employees/categories/settings context loads at startup, lives 6 hours
+  and refreshes in the background (never on a lookup's clock); the lookup
+  shares one keep-alive connection with no pacing delay
+  (`LightspeedClient.pooled(pace=0)`; batch runs are unchanged);
+  `find_sale` fires its ticket/padded-ticket/saleID queries together but
+  keeps that order of preference; customer + lines, then all brand and
+  serial calls, run side by side (`LOOKUP_CONCURRENCY` = 6). Each lookup logs
+  `Mack lookup <n>: lookup data .., find .., lines .., items .., total ..`
+  and returns the same numbers as `timing`. Don't reintroduce sequential awaits here.
+
 - **Units.** One per warranty: `<saleLineID>-<n>` sold, `R<saleLineID>-<n>`
   returned (`reverses` = SaleLine.parentSaleLineID). Detected for EVERY shop,
   refunds and walk-ins included, so the hook sits BEFORE the shop/refund

@@ -4,6 +4,7 @@ Run from the repo root with the app's requirements installed:
     python tests/test_mack.py
 """
 import asyncio, os, sys, tempfile, json
+from datetime import datetime, timedelta, timezone
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
 os.environ["LIGHTSPEED_CLIENT_ID"] = "x"
@@ -38,10 +39,14 @@ CUST = {"customerID": "55", "firstName": "Pat", "lastName": "Test", "company": "
                     "Addresses": {"ContactAddress": {"address1": "1 Main St", "address2": "", "city": "Rocklin",
                                                      "state": "CA", "zip": "95765"}}}}
 
+# Sales are dated yesterday so the "last N days" windows keep finding them
+# no matter when the tests run (a fixed date broke /mack/preview after a week).
+SOLD_AT = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0).isoformat()
+
 def sale(sid, lines, shop="1", total=None, cust="55", completed="true"):
     s = {"saleID": str(sid), "completed": completed, "voided": "false", "shopID": shop,
-         "customerID": cust, "employeeID": "7", "timeStamp": "2026-10-06T19:00:00+00:00",
-         "completeTime": "2026-10-06T19:00:00+00:00",
+         "customerID": cust, "employeeID": "7", "timeStamp": SOLD_AT,
+         "completeTime": SOLD_AT,
          "calcTotal": str(total if total is not None else sum(float(l["calcSubtotal"]) for l in lines)),
          "SaleLines": {"SaleLine": lines}}
     if cust != "0": s["Customer"] = CUST
@@ -148,7 +153,7 @@ mk.MACK_WEBAPP_URL = "https://script.google.com/macros/s/mack/exec"
 ctx = {"shops": {"1": "Rocklin"}, "employees": {"7": "Alison Watkins"}, "categories": CATS,
        "qual_ids": {"1", "2"}, "min_camera_price": 100}
 b = run(mk.sale_bundle(FakeClient(), "101", ctx))
-assert b["sale_id"] == "101" and b["store"] == "Rocklin" and b["date"] == "10-06-2026", b
+assert b["sale_id"] == "101" and b["store"] == "Rocklin" and b["date"] == mk.mack_date(SOLD_AT), b
 assert b["customer"]["zip"] == "95765" and b["customer"]["email"] == "pat@example.com"
 cam = b["lines"][0]; war = b["lines"][1]
 assert cam["brand"] == "Canon" and cam["model"] == "EOS R7 Kit w/ 18-150mm" and cam["serials"] == ["SN-1"], cam
@@ -169,6 +174,7 @@ print("parsers: OK")
 # ── 6. endpoint auth
 from fastapi.testclient import TestClient
 tc = TestClient(main.app)
+real_mack_context = main._mack_context
 main._mack_context = lambda client: asyncio.sleep(0, result=ctx)
 assert tc.get("/mack/sale/101").status_code == 403
 assert tc.get("/mack/sale/101", headers={"X-Mack-Secret": "wrong"}).status_code == 403
@@ -177,5 +183,82 @@ assert r.status_code == 200 and r.json()["sale_id"] == "101", r.text
 assert tc.get("/mack/sale/abc", headers={"X-Mack-Secret": "mack-secret"}).status_code == 400
 r = tc.get("/mack/preview?days=3"); assert r.status_code == 200 and r.json()["count"] == 6 and "customer" not in r.json()["units"][0], r.text
 assert "Load past Mack warranties" in tc.get("/").text
+r = tc.get("/mack/sale/101", headers={"X-Mack-Secret": "mack-secret"})
+assert {"lookup data", "find", "lines", "items", "total"} <= set(r.json()["timing"]), r.json().get("timing")
 print("endpoints: OK")
+
+# ── 7. Speed: independent Lightspeed calls overlap, answers stay the same
+import time, httpx
+
+class SlowClient(FakeClient):
+    """Every Lightspeed call takes 0.2 s, like a real round trip."""
+    async def get(self, path, params=None):
+        await asyncio.sleep(0.2)
+        return await super().get(path, params)
+    async def get_sale_lines(self, sid):
+        await asyncio.sleep(0.2)
+        return await super().get_sale_lines(sid)
+    async def get_customer(self, cid):
+        await asyncio.sleep(0.2)
+        return await super().get_customer(cid)
+
+mk._manufacturers.clear()
+started = time.perf_counter()
+slow = run(mk.sale_bundle(SlowClient(), "101", ctx))
+elapsed = time.perf_counter() - started
+# One-at-a-time this receipt costs at least 7 round trips (1.4 s); side by side it is 3 rounds.
+assert elapsed < 0.9, f"lookup took {elapsed:.2f}s"
+same = lambda bundle: {k: v for k, v in bundle.items() if k not in ("timing", "fetched_at")}
+assert same(slow) == same(b), "parallel lookup changed the answer"
+assert set(slow["timing"]) == {"find", "lines", "items"}
+
+class TicketClient(FakeClient):
+    async def get(self, path, params=None):
+        if path == "Sale.json" and params and params.get("ticketNumber") == "00000101":
+            await asyncio.sleep(0.1)   # answers last, must still beat the saleID match
+            return {"Sale": [{"saleID": "999", "ticketNumber": "00000101"}]}
+        return await super().get(path, params)
+assert run(TicketClient().find_sale("101"))["saleID"] == "999"
+assert run(FakeClient().find_sale("101"))["saleID"] == "101"
+
+class ExpiredClient(FakeClient):
+    async def get(self, path, params=None):
+        raise httpx.HTTPStatusError("401", request=httpx.Request("GET", "https://x"),
+                                    response=httpx.Response(401))
+try:
+    run(ExpiredClient().find_sale("101"))
+    raise AssertionError("a 401 from Lightspeed was swallowed")
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 401
+
+async def check_pooled():
+    c = FakeClient()
+    async with c.pooled(pace=0) as same_client:
+        assert same_client is c and c._http is not None and c.PACE_SECONDS == 0
+    assert c._http is None and c.PACE_SECONDS == ls.LightspeedClient.PACE_SECONDS
+run(check_pooled())
+
+async def check_context():
+    main._mack_ctx.clear()
+    main._mack_ctx_refresh = None
+    real_load = main._load_mack_context
+    loads = []
+    async def slow_load(client):
+        loads.append(client)
+        await asyncio.sleep(0.3)
+        main._mack_ctx.update({"at": time.time(), "n": len(loads)})
+    main._load_mack_context = slow_load
+    try:
+        first = await real_mack_context(FakeClient())        # nothing cached: waits for the load
+        assert first["n"] == 1
+        main._mack_ctx["at"] -= main.MACK_CTX_SECONDS + 1     # now stale
+        t = time.perf_counter()
+        stale = await real_mack_context(FakeClient())
+        assert time.perf_counter() - t < 0.05 and stale["n"] == 1, "stale data made the lookup wait"
+        await main._mack_ctx_refresh                         # refreshed in the background
+        assert main._mack_ctx["n"] == 2
+    finally:
+        main._load_mack_context = real_load
+run(check_context())
+print(f"speed: OK  (receipt with 0.2 s round trips took {elapsed:.2f}s)")
 print("ALL SERVER TESTS PASSED")

@@ -18,6 +18,7 @@ import secrets
 import sys
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -993,6 +994,7 @@ async def startup() -> None:
         lg.propagate = False
     store.init()
     asyncio.create_task(scheduler_loop())
+    warm_mack_context()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1283,27 +1285,56 @@ async def debug_sale(number: str):
 # ── Mack warranties (see mack.py) ─────────────────────────────────────────────
 
 _mack_ctx: dict = {}
-MACK_CTX_SECONDS = 600
+_mack_ctx_refresh: Optional[asyncio.Task] = None
+MACK_CTX_SECONDS = 6 * 3600   # shops, employees and categories rarely change
 
 
-async def _mack_context(client: ls.LightspeedClient) -> dict:
-    """Shops, employees, categories and the camera/lens category IDs, cached
-    for 10 minutes so a lookup at the counter costs only the sale's own calls."""
-    if _mack_ctx and time.time() - _mack_ctx["at"] < MACK_CTX_SECONDS:
-        return _mack_ctx
+async def _load_mack_context(client: ls.LightspeedClient) -> None:
     sheet = _make_sheets()
     await sheet.ensure_setup()
-    settings   = await sheet.read_settings()
-    categories = await client.get_categories()
+    settings = await sheet.read_settings()
+    categories, shops, employees = await asyncio.gather(
+        client.get_categories(), client.get_shops(), client.get_employees())
     _mack_ctx.update({
         "at":         time.time(),
-        "shops":      await client.get_shops(),
-        "employees":  await client.get_employees(),
+        "shops":      shops,
+        "employees":  employees,
         "categories": categories,
         "qual_ids":   ls.category_ids_under(categories, settings["categories"]),
         "min_camera_price": MIN_CAMERA_PRICE,
     })
+
+
+async def _refresh_mack_context_quietly() -> None:
+    try:
+        await _load_mack_context(await get_client())
+    except Exception as exc:
+        log.warning(f"Mack lookup data refresh failed (will retry on a later lookup): {exc}")
+
+
+async def _mack_context(client: ls.LightspeedClient) -> dict:
+    """Shops, employees, categories and the camera/lens category IDs for the
+    review panel. Loaded at startup, kept 6 hours, and refreshed in the
+    background once stale, so a lookup at the counter only waits for the
+    sale's own calls. Only a lookup that beats the startup load waits."""
+    global _mack_ctx_refresh
+    if not _mack_ctx:
+        if _mack_ctx_refresh and not _mack_ctx_refresh.done():
+            await _mack_ctx_refresh
+        if not _mack_ctx:
+            await _load_mack_context(client)
+        return _mack_ctx
+    stale = time.time() - _mack_ctx["at"] >= MACK_CTX_SECONDS
+    if stale and (_mack_ctx_refresh is None or _mack_ctx_refresh.done()):
+        _mack_ctx_refresh = asyncio.create_task(_refresh_mack_context_quietly())
     return _mack_ctx
+
+
+def warm_mack_context() -> None:
+    """Start loading the review panel's lookup data in the background."""
+    global _mack_ctx_refresh
+    if mk.enabled() and (_mack_ctx_refresh is None or _mack_ctx_refresh.done()):
+        _mack_ctx_refresh = asyncio.create_task(_refresh_mack_context_quietly())
 
 
 @app.get("/mack/sale/{number}")
@@ -1319,8 +1350,17 @@ async def mack_sale(number: str, request: Request):
         return JSONResponse({"error": "Enter the receipt number (digits only)."}, status_code=400)
     try:
         client = await get_client()
-        ctx    = await _mack_context(client)
-        bundle = await mk.sale_bundle(client, number, ctx)
+        started = time.perf_counter()
+        # One keep-alive connection and no pacing delay: a person is waiting.
+        async with client.pooled(pace=0):
+            ctx = await _mack_context(client)
+            ctx_seconds = round(time.perf_counter() - started, 2)
+            bundle = await mk.sale_bundle(client, number, ctx)
+        timing = {"lookup data": ctx_seconds, **bundle.get("timing", {}),
+                  "total": round(time.perf_counter() - started, 2)}
+        bundle["timing"] = timing
+        log.info("Mack lookup %s: %s", number,
+                 ", ".join(f"{step} {secs}s" for step, secs in timing.items()))
         return JSONResponse(bundle, status_code=404 if bundle.get("error") else 200)
     except ls.AuthExpired:
         return JSONResponse({"error": "The follow-up app lost its Lightspeed connection. "

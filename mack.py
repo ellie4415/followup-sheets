@@ -19,6 +19,7 @@ cursor advances, and are sent separately; anything that fails to send is
 retried on the next run. The sheet dedups by unit key, so retries are safe.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -42,6 +43,7 @@ MACK_SECRET     = os.environ.get("MACK_SECRET", "").strip()
 MACK_ITEM_PATTERN = re.compile(os.environ.get("MACK_ITEM_PATTERN", r"^\s*mack\b"), re.I)
 OUTBOX_KEY = "mack_outbox"
 OUTBOX_CAP = 2000
+LOOKUP_CONCURRENCY = 6   # Lightspeed calls in flight at once during one receipt lookup
 
 
 def enabled() -> bool:
@@ -272,30 +274,75 @@ def model_from(name: str, brand: str) -> str:
     return re.sub(r"\s*\++\s*$", "", n)
 
 
+async def _gather_limited(coros: list, limit: int = LOOKUP_CONCURRENCY) -> list:
+    """Run coroutines side by side, at most `limit` at a time; results in order."""
+    gate = asyncio.Semaphore(limit)
+
+    async def run(coro):
+        async with gate:
+            return await coro
+    return await asyncio.gather(*(run(c) for c in coros))
+
+
+async def _no_customer() -> dict:
+    return {}
+
+
 async def sale_bundle(client: ls.LightspeedClient, number: str, ctx: dict) -> dict:
     """Everything the review panel needs for one receipt. ctx carries
-    shops, employees, categories and the camera/lens category IDs."""
-    sale = await client.find_sale(number)
-    if sale is None:
-        return {"error": f"Receipt {number} was not found in Lightspeed."}
-    sale_id = str(sale.get("saleID") or "")
-    lines = await client.get_sale_lines(sale_id)
-    customer: dict = {}
-    cid = str(sale.get("customerID") or "0")
-    if cid not in ("", "0"):
-        customer = await client.get_customer(cid)
+    shops, employees, categories and the camera/lens category IDs.
 
-    employees = ctx.get("employees", {})
-    out_lines = []
+    Calls that don't depend on each other run side by side: the sale lines
+    with the customer, then every brand and serial-number lookup at once.
+    "timing" records the seconds each step took (logged by the route)."""
+    timing: dict = {}
+    clock = time.perf_counter()
+
+    def mark(step: str) -> None:
+        nonlocal clock
+        now = time.perf_counter()
+        timing[step] = round(now - clock, 2)
+        clock = now
+
+    sale = await client.find_sale(number)
+    mark("find")
+    if sale is None:
+        return {"error": f"Receipt {number} was not found in Lightspeed.", "timing": timing}
+    sale_id = str(sale.get("saleID") or "")
+    cid = str(sale.get("customerID") or "0")
+    lines, customer = await asyncio.gather(
+        client.get_sale_lines(sale_id),
+        client.get_customer(cid) if cid not in ("", "0") else _no_customer(),
+    )
+    mark("lines")
+
+    kept = []
     for line in lines:
         name = line_name(line)
         qty = _qty(line)
         if not name or not qty:
             continue
         item = line.get("Item") if isinstance(line.get("Item"), dict) else {}
+        kept.append((line, name, qty, item, is_mack(name)))
+
+    # One brand lookup per manufacturer and one serial lookup per gear line,
+    # all at once.
+    makers = list(dict.fromkeys(str(item.get("manufacturerID") or "0")
+                                for _, _, _, item, mack in kept if not mack))
+    serial_lines = [str(line.get("saleLineID") or "")
+                    for line, _, qty, _, mack in kept if not mack and qty > 0]
+    found = await _gather_limited(
+        [_brand(client, {"manufacturerID": maker}) for maker in makers]
+        + [_serials(client, line_id) for line_id in serial_lines])
+    brands = dict(zip(makers, found[:len(makers)]))
+    serials = dict(zip(serial_lines, found[len(makers):]))
+    mark("items")
+
+    employees = ctx.get("employees", {})
+    out_lines = []
+    for line, name, qty, item, mack in kept:
         line_id = str(line.get("saleLineID") or "")
-        mack = is_mack(name)
-        brand = "" if mack else await _brand(client, item)
+        brand = "" if mack else brands.get(str(item.get("manufacturerID") or "0"), "")
         cat_id = str(item.get("categoryID") or line.get("categoryID") or "")
         price = unit_price(line)
         out_lines.append({
@@ -309,7 +356,7 @@ async def sale_bundle(client: ls.LightspeedClient, number: str, ctx: dict) -> di
             "category":  ls.category_path(ctx.get("categories", []), cat_id),
             "camera_or_lens": (cat_id in ctx.get("qual_ids", set())
                                and price >= ctx.get("min_camera_price", 100)),
-            "serials":   [] if (mack or qty < 0) else await _serials(client, line_id),
+            "serials":   [] if (mack or qty < 0) else serials.get(line_id, []),
             "salesperson": employees.get(str(line.get("employeeID") or ""), ""),
             "is_mack":   mack,
             "plan":      parse_plan(name) if mack else None,
@@ -328,4 +375,5 @@ async def sale_bundle(client: ls.LightspeedClient, number: str, ctx: dict) -> di
         "customer":   customer_details(customer) if customer else None,
         "lines":      out_lines,
         "fetched_at": int(time.time()),
+        "timing":     timing,
     }

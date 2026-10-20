@@ -35,7 +35,7 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 3;
+const VERSION   = 4;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
@@ -222,8 +222,16 @@ function register_(reg) {
   const start = regSh.getLastRow() + 1;
   regSh.getRange(start, 1, 1, REG_WIDTH).setValues([row]);
   regSh.getRange(start, 1, 1, REG_WIDTH).setNumberFormats([registrationFormats_()]);
-  addNewCodesAndStaff_([{ item: reg.warranty_item, salesperson: reg.salesperson }]);
-  refreshStatuses_();
+  // The registration is saved at this point. If the bookkeeping below fails,
+  // don't report the save as failed (staff would try again and hit "already
+  // registered"): the waiting list works statuses out live (pending_) and
+  // puts them back in the sheet, and the error lands in Executions.
+  try {
+    addNewCodesAndStaff_([{ item: reg.warranty_item, salesperson: reg.salesperson }]);
+    refreshStatuses_();
+  } catch (err) {
+    console.error('Registration ' + id + ' saved, but updating statuses failed: ' + (err && err.message || err));
+  }
   return { ok: true, id: id, row: start };
 }
 
@@ -303,6 +311,20 @@ function registrationFormats_() {
 // ── Statuses ───────────────────────────────────────────────────────────────
 
 function refreshStatuses() { withLock_(refreshStatuses_); }
+
+// Writes the computed statuses back when the sheet has drifted. Never waits
+// long for the lock and never fails the caller (the waiting list).
+function healStatuses_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(2000)) return;
+  try {
+    refreshStatuses_();
+  } catch (err) {
+    console.error('Could not update statuses: ' + (err && err.message || err));
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 function refreshStatuses_() {
   const soldSh = sheet_(SOLD_TAB), regSh = sheet_(REG_TAB);
@@ -412,13 +434,19 @@ function computeStatuses_(sold, regs, codes) {
 
 // ── For the extension ──────────────────────────────────────────────────────
 
+// Statuses are worked out here rather than read from the Status column, so a
+// warranty leaves the list the moment its registration is saved even if the
+// refresh after that save failed. Drifted Status cells are then fixed.
 function pending_(store) {
   const sold = readRows_(sheet_(SOLD_TAB), SOLD_HEADERS.length);
+  const regs = readRows_(sheet_(REG_TAB), REG_WIDTH);
+  const live = computeStatuses_(sold, regs, readCodes_());
+  if (live.sold.some(function (s, i) { return s.status !== sold[i][S['Status']]; })) healStatuses_();
   const today = startOfDay_(new Date());
   const want = String(store || '').toLowerCase();
   const waiting = [];
-  sold.forEach(function (r) {
-    if (r[S['Status']] !== 'Waiting') return;
+  sold.forEach(function (r, i) {
+    if (live.sold[i].status !== 'Waiting') return;
     if (want && String(r[S['Store']]).toLowerCase().indexOf(want) < 0) return;
     const d = r[S['Date']] instanceof Date ? r[S['Date']] : null;
     waiting.push({
@@ -808,7 +836,7 @@ function readFofTable_(input) {
     const file = DriveApp.getFileById(id);
     values = file.getMimeType() === MimeType.GOOGLE_SHEETS
       ? SpreadsheetApp.openById(id).getSheets()[0].getDataRange().getDisplayValues()
-      : Utilities.parseCsv(file.getBlob().getDataAsString('UTF-8').replace(/^﻿/, ''));
+      : Utilities.parseCsv(file.getBlob().getDataAsString('UTF-8').replace(/^\uFEFF/, ''));
   } else {
     values = SpreadsheetApp.getActiveSheet().getDataRange().getDisplayValues();
   }
@@ -816,7 +844,7 @@ function readFofTable_(input) {
 }
 
 function fofRecords_(values) {
-  const head = (values[0] || []).map(function (h) { return String(h).replace(/^﻿/, '').trim(); });
+  const head = (values[0] || []).map(function (h) { return String(h).replace(/^\uFEFF/, '').trim(); });
   if (head.indexOf('Row Id') < 0 || head.indexOf('DealerInvoice') < 0) {
     throw new Error('That is not a Forms on Fire Mack export (it has no "Row Id" and "DealerInvoice" columns).');
   }
