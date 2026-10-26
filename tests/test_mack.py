@@ -261,4 +261,35 @@ async def check_context():
         main._load_mack_context = real_load
 run(check_context())
 print(f"speed: OK  (receipt with 0.2 s round trips took {elapsed:.2f}s)")
+# ── Quick check: warranties reach the sheet minutes after the sale ───────────
+import time as _time
+main._mack_ctx.update({"at": _time.time(), "shops": {"1": "Rocklin", "2": "Reno", "9": "Action Camera Online"},
+                       "employees": {"7": "Alison Watkins"}})
+mk._bridge_post = fake_bridge_ok
+store.set_json(mk.OUTBOX_KEY, []); store.set_json("mack_quick_seen", []); posted.clear()
+open_cart = sale(106, [line(8, "Mack 3 Yr Under $750 Diamond OL", 1, 109.95, cat="3")], completed="false")
+SALES.append(open_cart)
+q1 = run(main.mack_quick_check())
+assert q1["found"] == 6 and q1["added"] == 6 and q1["looked"] == 5, q1
+assert [u["key"] for u in posted[-1]["units"]] == ["6-1", "R4-1", "5-1", "3-1", "3-2", "2-1"], posted[-1]["units"]
+assert store.get_json(mk.OUTBOX_KEY) == []
+assert "106" not in store.get_json("mack_quick_seen"), "an open cart is looked at again next time"
+q2 = run(main.mack_quick_check())
+assert q2 == {"looked": 0, "found": 0, "sent": 0, "added": 0}, q2
+open_cart["completed"] = "true"
+q3 = run(main.mack_quick_check())
+assert q3["found"] == 1 and posted[-1]["units"][0]["key"] == "8-1", q3
+SALES.remove(open_cart)
+
+# A unit queued while a send is on its way (the hourly run) stays queued.
+async def bridge_while_hourly_adds(body):
+    mk.outbox_add([{"key": "99-1"}])
+    return {"ok": True, "added": len(body["units"])}
+mk._bridge_post = bridge_while_hourly_adds
+store.set_json(mk.OUTBOX_KEY, [{"key": "98-1"}])
+run(mk.send_outbox())
+assert [u["key"] for u in store.get_json(mk.OUTBOX_KEY)] == ["99-1"], store.get_json(mk.OUTBOX_KEY)
+mk._bridge_post = fake_bridge_ok
+store.set_json(mk.OUTBOX_KEY, [])
+print("quick check: OK")
 print("ALL SERVER TESTS PASSED")

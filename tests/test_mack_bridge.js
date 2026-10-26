@@ -179,6 +179,8 @@ sheet_ = function (name) {
 };
 readRows_ = function (sh) { return fakeTabs[sh.name] || []; };
 readCodes_ = function () { return codes; };
+readSettings_ = function () { return ['', 17, 3, 25, 'adapter, drone', 'kit, w/', 3, 30, 'Mack files']; };
+readKits_ = function () { return { 'sony zv-e1 kit black': { camera: 'ZV-E1', lenses: ['FE 28-60mm F4-5.6'] } }; };
 refreshStatuses_ = function () { refreshes++; if (refreshFails) throw new Error('validation rule on the Status column'); };
 LockService = { getScriptLock: function () {
   return { tryLock: function () { return true; }, waitLock: function () {}, releaseLock: function () {} }; } };
@@ -239,7 +241,7 @@ function cellSheet(failRow) {
     var key = row + ':' + col;
     return { setNumberFormat: function () { throw typedError; },
              setValue: function (v) {
-               if (row === failRow && col === T['Sent to Mack'] + 1 && v === '10-20-2026') throw new Error('value does not match the column type');
+               if (row === failRow && col === T['Sent to Mack'] + 1 && v === true) throw new Error('value does not match the column type');
                cells[key] = v; return this; } };
   } };
 }
@@ -248,10 +250,118 @@ markRegs[0][T['Sent to Mack']] = false; markRegs[1][T['Sent to Mack']] = '';
 var markRows = markRegs.map(function () { var r = new Array(MACK_HEADERS.length).fill(''); r[M['WarrType']] = 'M029'; return r; });
 var sentCol = T['Sent to Mack'] + 1;
 var failing = cellSheet(4);   // sheet row 4 = third registration
-var markErr = markSent_(failing, markRegs, [0, 1, 2], markRows, '10-20-2026');
-eq([!!markErr, failing.cells['2:' + sentCol], failing.cells['3:' + sentCol]], [true, false, ''],
-   'a failed mark puts the earlier rows back the way they were');
+markRegs[0][T['Notes']] = 'Typed in panel.';
+var markErr = markSent_(failing, markRegs, [0, 1, 2], markRows, '10-20-2026', 'Mack 10-20-2026');
+var notesCol = T['Notes'] + 1;
+eq([!!markErr, failing.cells['2:' + sentCol], failing.cells['3:' + sentCol], failing.cells['2:' + notesCol]],
+   [true, false, '', 'Typed in panel.'], 'a failed mark puts the earlier rows (box and notes) back the way they were');
 var working = cellSheet(-1);
-eq([markSent_(working, markRegs, [0, 1, 2], markRows, '10-20-2026'), working.cells['4:' + sentCol]], [null, '10-20-2026'],
-   'all rows marked when nothing fails');
+eq([markSent_(working, markRegs, [0, 1, 2], markRows, '10-20-2026', 'Mack 10-20-2026'), working.cells['4:' + sentCol],
+    working.cells['2:' + notesCol], working.cells['3:' + notesCol]],
+   [null, true, 'Typed in panel. Sent to Mack 10-20-2026 in "Mack 10-20-2026".', 'Sent to Mack 10-20-2026 in "Mack 10-20-2026".'],
+   'all rows ticked, with a note added after any existing notes');
 print(failures ? failures + ' FAILURE(S)' : 'ALL V5 TABLE TESTS PASSED');
+
+// v6: Mack's file for a range of warranty sale dates.
+var oct20 = new Date(2026, 9, 20);
+function span(r) { return r && !r.error ? mmddyyyy_(r.from) + ' to ' + mmddyyyy_(r.to) : r; }
+eq(parseDateRange_('', oct20), null, 'blank range = everything');
+eq(span(parseDateRange_('10-01-2026 to 10-15-2026', oct20)), '10-01-2026 to 10-15-2026', 'range with full dates');
+eq(span(parseDateRange_('10/1/26 - 10/15/26', oct20)), '10-01-2026 to 10-15-2026', 'slashes and two-digit years');
+eq(span(parseDateRange_('10/1-10/15', oct20)), '10-01-2026 to 10-15-2026', 'no year means this year, even with a dash between');
+eq(span(parseDateRange_('10/15 through 10/1', oct20)), '10-01-2026 to 10-15-2026', 'dates in either order');
+eq(span(parseDateRange_('10/7', oct20)), '10-07-2026 to 10-07-2026', 'one date = that day');
+eq(!!parseDateRange_('2/30/2026 to 3/2/2026', oct20).error, true, 'impossible date rejected');
+eq(!!parseDateRange_('last week', oct20).error, true, 'words rejected');
+eq(!!parseDateRange_('10/1/2016 to 10/15/2016', oct20).error, true, 'wrong year caught');
+
+function datedReg(key, sold) { var r = regRow({ key: key }); r[M['ServiceContractPurchaseDate']] = sold; return r; }
+var rangeRegs = [datedReg('1-1', '09-30-2026'), datedReg('2-1', '10-01-2026'), datedReg('3-1', '10-15-2026'),
+                 datedReg('4-1', '10-16-2026'), datedReg('5-1', ''), datedReg('6-1', '10-05-2026'), datedReg('7-1', '09-01-2026')];
+var rangeStatuses = ['Ready to send', 'Ready to send', 'Ready to send', 'Ready to send', 'Ready to send',
+                     'Needs WarrType code', 'Cancel with Mack'];
+var picked = pickForMackFile_(rangeRegs, rangeStatuses, parseDateRange_('10/1 to 10/15', oct20));
+eq([picked.ready, picked.needCode, picked.cancel, picked.undated], [[1, 2], [5], [6], 1],
+   'range keeps both end days, skips outside dates, counts undated, always lists cancellations');
+eq(pickForMackFile_(rangeRegs, rangeStatuses, null).ready, [0, 1, 2, 3, 4], 'no range = every ready row');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V6 DATE-RANGE TESTS PASSED');
+
+// v7: Sent to Mack is a checkbox (Ellie's table); the date lives in Notes.
+var ticked = regRow({ key: '8-1', sent: true }); ticked[T['Notes']] = 'Sent to Mack 10-20-2026 in "Mack 10-20-2026".';
+eq([sentOn_(ticked), sentOn_(regRow({ key: '8-2', sent: true })), sentOn_(regRow({ key: '8-3', sent: false })),
+    sentOn_(regRow({ key: '8-4', sent: '10-05-2026' }))], ['10-20-2026', 'already', '', '10-05-2026'],
+   'panel shows the sent date from the note, a typed date, or "already"');
+eq(computeStatuses_([soldRow({ sale: '9', line: '8', key: '8-1', qty: 1 })], [ticked], codes).sold[0].status, 'Sent',
+   'a ticked box counts as sent');
+var fofTicked = fofRegistrations_([{ 'Row Id': '9001', First: 'Pat', Last: 'Test', DealerInvoice: '130', EquipmentPurchaseDate: '10-01-2026',
+  ServiceContractPurchaseDate: '10-01-2026' }], [], [], codes, FOF_SENT_LABEL, oct20).rows[0];
+eq([fofTicked[T['Sent to Mack']], fofTicked[T['Notes']].indexOf(FOF_SENT_LABEL) === 0], [true, true],
+   'Forms on Fire "already sent" ticks the box and says so in Notes');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V7 CHECKBOX TESTS PASSED');
+
+// v8: the kit list from Railway fills the Kits tab without touching what people typed.
+function kitRow(name, camera, l1, l2, label, id) {
+  var r = new Array(KIT_HEADERS.length).fill('');
+  r[K['Lightspeed kit item']] = name; r[K['Camera model for Mack']] = camera || '';
+  r[K['Lens 1 model for Mack']] = l1 || ''; r[K['Lens 2 model for Mack (two-lens kits)']] = l2 || '';
+  r[K['Filled in by']] = label || ''; r[K['Lightspeed item ID']] = id || '';
+  return r;
+}
+var kitRows = [
+  kitRow('Canon EOS R50 2 Lens Kit Black', 'EOS R50', 'RF-S 18-45mm', 'RF-S 55-210mm'),          // typed by hand
+  kitRow('Sony ZV-E10 II Kit Black', 'ZV-E10 II', '', '', KIT_NEEDS_PERSON, '40'),                // still unknown
+  kitRow('Sony ZV-E1 Kit White', 'ZV-E1', 'FE 28-60mm F4-5.6', '', KIT_NEEDS_PERSON, '41'),        // a person typed the lens
+  kitRow('Canon EOS R5 24-105mm Kit', 'EOS R5', 'RF 24-105mm F4 L IS USM', '', 'Check the lens (a best guess)', '42'),
+  kitRow('Nikon Z30 2 Lens Kit', 'Z30', '', '', '', ''),                                           // added blank by the panel
+];
+var kitList = [
+  { item_id: '30', name: 'Canon EOS R50 2 Lens Kit Black', camera: 'EOS R50', sku: '5811C022', upc: '013803351422',
+    lenses: ['RF-S 18-45mm F4.5-6.3 IS STM', 'RF-S 55-210mm F5-7.1 IS STM'], source: 'UPC lookup', complete: true, check: false },
+  { item_id: '40', name: 'Sony ZV-E10 II Kit Black', camera: 'ZV-E10 II', lenses: [], source: '', complete: false, check: false },
+  { item_id: '41', name: 'Sony ZV-E1 Kit White', camera: 'ZV-E1', lenses: [], source: '', complete: false, check: false },
+  { item_id: '42', name: 'Canon EOS R5 24-105mm Kit', camera: 'EOS R5', lenses: ['RF 24-105mm F4 L IS USM'],
+    source: 'item name', complete: true, check: false },
+  { item_id: '43', name: 'Nikon Z30 2 Lens Kit', camera: 'Z30', source: 'UPC lookup', complete: true, check: false,
+    lenses: ['NIKKOR Z DX 16-50mm f/3.5-6.3 VR', 'NIKKOR Z DX 50-250mm f/4.5-6.3 VR'] },
+  { item_id: '44', name: 'Canon EOS R7 Kit w/18-150mm', camera: 'EOS R7', lenses: ['RF-S 18-150mm F3.5-6.3 IS STM'],
+    source: 'item name', complete: true, check: false },
+  { item_id: '45', name: 'Sony ZV-E10 II Kit White', camera: 'ZV-E10 II', lenses: [], source: '', complete: false, check: false },
+  { item_id: '46', name: 'Canon EOS R6 II 24-105 STM', camera: 'EOS R6 II', lenses: ['RF 24-105mm F4-7.1 IS STM'],
+    source: 'item name', complete: true, check: false },
+  { item_id: '46', name: 'Canon EOS R6 II 24-105 STM', camera: 'EOS R6 II', lenses: ['RF 24-105mm F4-7.1 IS STM'],
+    source: 'item name', complete: true, check: false },
+];
+var km = mergeKits_(kitRows, kitList);
+var hand = km.changed[0];
+eq([hand[K['Lens 1 model for Mack']], hand[K['Filled in by']], hand[K['Lightspeed item ID']], hand[K['UPC']]],
+   ['RF-S 18-45mm', '', '30', '013803351422'], 'a typed row keeps its words and just gets the Lightspeed IDs');
+eq(km.changed[1], undefined, 'still unknown: nothing to change');
+eq(km.changed[2][K['Filled in by']], 'Changed by a person', 'a lens typed into a NEEDS row is the person\'s');
+eq(km.changed[3][K['Filled in by']], 'From the item name', 'a confirmed guess loses its "check" label');
+eq([km.changed[4][K['Lens 1 model for Mack']], km.changed[4][K['Lens 2 model for Mack (two-lens kits)']],
+    km.changed[4][K['Filled in by']], km.changed[4][K['Lightspeed item ID']]],
+   ['NIKKOR Z DX 16-50mm f/3.5-6.3 VR', 'NIKKOR Z DX 50-250mm f/4.5-6.3 VR', 'From the UPC lookup', '43'],
+   'a blank row from the panel gets filled');
+eq(km.filled, 1, 'one row had blanks filled');
+eq(km.added.map(function (r) { return [r[0], r[K['Filled in by']]]; }),
+   [['Canon EOS R7 Kit w/18-150mm', 'From the item name'], ['Sony ZV-E10 II Kit White', KIT_NEEDS_PERSON],
+    ['Canon EOS R6 II 24-105 STM', 'From the item name']], 'new kits are added once, unknown lenses flagged');
+var renamed = mergeKits_([kitRow('Canon EOS R7 Kit w/18-150mm', 'EOS R7', 'RF-S 18-150mm F3.5-6.3 IS STM', '', 'From the item name', '44')],
+  [{ item_id: '44', name: 'Canon EOS R7 Kit w/ RF-S 18-150mm', camera: 'EOS R7', lenses: ['RF-S 18-150mm F3.5-6.3 IS STM'],
+     source: 'item name', complete: true, check: false }]);
+eq([renamed.changed[0][0], renamed.added.length], ['Canon EOS R7 Kit w/ RF-S 18-150mm', 0], 'a renamed item keeps its row (matched by item ID)');
+eq(Object.keys(mergeKits_(km.added, kitList.slice(5, 8)).changed).length, 0, 'a second sync changes nothing');
+var kitsRead = (function () {
+  var out = {};
+  kitRows.concat(km.added).forEach(function (r) {
+    var camera = String(r[1] || '').trim();
+    var lenses = [r[2], r[3]].map(function (v) { return String(v || '').trim(); }).filter(String);
+    if (r[0] && (camera || lenses.length)) out[normKit_(r[0])] = { camera: camera, lenses: lenses };
+  });
+  return out;
+})();
+eq(kitsRead['canon eos r6 ii 24-105 stm'], { camera: 'EOS R6 II', lenses: ['RF 24-105mm F4-7.1 IS STM'] },
+   'the extension finds the kit by its Lightspeed name');
+eq(pending_('').rules.kits['sony zv-e1 kit black'].lenses, ['FE 28-60mm F4-5.6'],
+   'the waiting list carries the kit list to every register');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V8 KIT TESTS PASSED');

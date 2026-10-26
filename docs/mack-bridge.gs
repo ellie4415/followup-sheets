@@ -9,11 +9,13 @@
  *     added by the Chrome extension's Mack panel.
  *   - Codes tab: Lightspeed warranty item -> Mack WarrType code (Melinda
  *     fills these in by hand; new items appear automatically).
- *   - Kits tab: the camera and lens names Mack should get for each kit
- *     (kits seen in the panel are added automatically, blank, to fill in).
+ *   - Kits tab: what's in each camera kit (camera, lens 1, lens 2) for Mack
+ *     and the register's lens-serial reminder. Railway fills it from
+ *     Lightspeed's cameras twice a day (version 8); rows a person typed are
+ *     never overwritten. "NEEDS A PERSON" rows want the lens typed in.
  *   - Staff tab: who gets reminder emails.
  *   - Mack menu: make the file for Mack, load past warranties, import a
- *     Forms on Fire export, refresh, reminders on/off.
+ *     Forms on Fire export, update the Kits tab, refresh, reminders on/off.
  *   - Problems column (Registrations): anything wrong with a row. A row with
  *     problems is "Needs fixing" and stays out of Mack's file until the
  *     problem is fixed and the cell is cleared.
@@ -35,13 +37,18 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 5;
+const VERSION   = 8;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
 const CODES_TAB = 'Codes';
 const STAFF_TAB = 'Staff';
 const KITS_TAB = 'Kits';
+const KIT_HEADERS = ['Lightspeed kit item', 'Camera model for Mack', 'Lens 1 model for Mack',
+  'Lens 2 model for Mack (two-lens kits)', 'Notes', 'Filled in by', 'Lightspeed item ID', 'Manufacturer SKU', 'UPC'];
+const K = {};   // Kits tab column index (0-based) by header
+KIT_HEADERS.forEach(function (h, i) { K[h] = i; });
+const KIT_NEEDS_PERSON = 'NEEDS A PERSON: type the lens (Lightspeed and the UPC lookup don\'t say)';
 const SETTINGS_TAB = 'Settings';
 const FILE_TAB_NAME = 'API  use dates or po#';   // Mack's template tab name (two spaces)
 
@@ -113,6 +120,10 @@ function doPost(e) {
       ensureSetup_();
       return json_(withLock_(function () { return addSold_(body.units || []); }));
     }
+    if (body.secret === SECRET && body.action === 'kits') {
+      ensureSetup_();
+      return json_(withLock_(function () { return syncKits_(body.kits || []); }));
+    }
     if (body.key === STAFF_KEY && body.action === 'register') {
       ensureSetup_();
       return json_(withLock_(function () { return register_(body.registration || {}); }));
@@ -147,6 +158,7 @@ function onOpen() {
     .addItem('Load past warranties from Lightspeed', 'loadPastWarranties')
     .addItem('Mark selected rows as registered before this sheet', 'markRegisteredBefore')
     .addItem('Import a Forms on Fire export', 'importFormsOnFire')
+    .addItem('Update the Kits tab from Lightspeed', 'updateKitsFromLightspeed')
     .addSeparator()
     .addItem('Send reminders now', 'sendReminders')
     .addItem('Turn on daily reminders', 'turnOnReminders')
@@ -457,7 +469,9 @@ function pending_(store) {
     });
   });
   waiting.sort(function (a, b) { return (b.days || 0) - (a.days || 0); });
-  return { ok: true, v: VERSION, waiting: waiting, count: waiting.length };
+  // The rules ride along so every register's lens-serial reminder knows
+  // the kits, not just computers that have looked up a receipt.
+  return { ok: true, v: VERSION, waiting: waiting, count: waiting.length, rules: rules_() };
 }
 
 function saleForPanel_(n) {
@@ -482,7 +496,7 @@ function saleForPanel_(n) {
         code: (codes[normItem_(l.name)] || {}).code || '',
         status: s ? s[S['Status']] : (reg ? 'Registered' : 'Waiting'),
         registered: reg ? { on: fmtDate_(reg[T['Saved At']]), id: reg[T['Registration ID']],
-                            sent: reg[T['Sent to Mack']] ? fmtDate_(reg[T['Sent to Mack']]) : '' } : null,
+                            sent: sentOn_(reg) } : null,
       });
     }
   });
@@ -542,23 +556,36 @@ function rules_() {
 
 function makeMackFile() {
   const ui = menuUi_();
-  const ss = SpreadsheetApp.getActive();
   const statuses = withLock_(refreshStatuses_);
   const regSh = sheet_(REG_TAB);
   const regs = readRows_(regSh, REG_WIDTH);
   const codes = readCodes_();
-  const ready = [], needCode = [], cancel = [], fixing = [];
-  regs.forEach(function (r, i) {
-    const st = statuses.regs[i];
-    if (st === 'Ready to send') ready.push(i);
-    else if (st === 'Needs WarrType code') needCode.push(i);
-    else if (st === 'Cancel with Mack') cancel.push(i);
-    else if (st === 'Needs fixing') fixing.push(i);
-  });
+  const all = pickForMackFile_(regs, statuses.regs, null);
+  if (!all.ready.length) {
+    ui.alert('Nothing new to send.' + listNote_(all.needCode, regs, 'still need a WarrType code on the Codes tab') +
+      listNote_(all.fixing, regs, 'need fixing first (see their Problems column)') +
+      listNote_(all.cancel, regs, 'were returned after being sent: tell Mack to cancel them'));
+    return;
+  }
+
+  // Which ones: everything ready, or only warranties sold in a date range.
+  const soldDates = all.ready.map(function (i) { return warrantyDate_(regs[i]); })
+    .filter(Boolean).sort(function (a, b) { return a - b; });
+  const answer = ui.prompt('Make the file for Mack',
+    all.ready.length + ' warranties are ready to send' + (soldDates.length
+      ? ', sold ' + mmddyyyy_(soldDates[0]) + ' to ' + mmddyyyy_(soldDates[soldDates.length - 1]) : '') + '.\n\n' +
+    'To send only some of them, type the first and last warranty sale date, like 10-01-2026 to 10-15-2026.\n\n' +
+    'Leave it blank to send all of them.', ui.ButtonSet.OK_CANCEL);
+  if (answer.getSelectedButton() !== ui.Button.OK) return;
+  const range = parseDateRange_(answer.getResponseText(), new Date());
+  if (range && range.error) { ui.alert(range.error); return; }
+  const span = range ? mmddyyyy_(range.from) + ' to ' + mmddyyyy_(range.to) : '';
+  const pick = range ? pickForMackFile_(regs, statuses.regs, range) : all;
+  const ready = pick.ready, needCode = pick.needCode, cancel = pick.cancel, fixing = pick.fixing;
   if (!ready.length) {
-    ui.alert('Nothing new to send.' + listNote_(needCode, regs, 'still need a WarrType code on the Codes tab') +
-      listNote_(fixing, regs, 'need fixing first (see their Problems column)') +
-      listNote_(cancel, regs, 'were returned after being sent: tell Mack to cancel them'));
+    ui.alert('Nothing is ready to send for warranties sold ' + span + '.' +
+      listNote_(needCode, regs, 'in those dates still need a WarrType code on the Codes tab') +
+      listNote_(fixing, regs, 'in those dates need fixing first (see their Problems column)'));
     return;
   }
   if (fixing.length) {
@@ -577,7 +604,7 @@ function makeMackFile() {
   }
 
   const today = fmtDate_(new Date());
-  const file = SpreadsheetApp.create('Mack ' + today);
+  const file = SpreadsheetApp.create('Mack ' + today + (range ? ' (sold ' + span + ')' : ''));
   const out = file.getSheets()[0].setName(FILE_TAB_NAME);
   const rows = ready.map(function (i) {
     const r = regs[i].slice(0, MACK_HEADERS.length);
@@ -595,7 +622,7 @@ function makeMackFile() {
 
   let markError = null;
   withLock_(function () {
-    markError = markSent_(regSh, regs, ready, rows, today);
+    markError = markSent_(regSh, regs, ready, rows, today, file.getName());
     refreshStatuses_();
   });
   if (markError) {
@@ -603,17 +630,18 @@ function makeMackFile() {
     // trying again is always safe.
     DriveApp.getFileById(file.getId()).setTrashed(true);
     ui.alert('The file for Mack was not made',
-      'The sheet could not mark these warranties as sent, so the new file was deleted and nothing changed.\n\n' +
+      'The sheet could not tick these warranties as sent, so the new file was deleted and nothing changed.\n\n' +
       'Error: ' + String(markError && markError.message || markError) + '\n\n' +
-      'If the Registrations tab was turned into a table, open the table menu (the arrow next to the table name) ' +
-      'and choose "Revert to unformatted data". If the Sent to Mack column has checkboxes, select those cells ' +
-      'and press Delete to remove them. Then try again.', ui.ButtonSet.OK);
+      'The Sent to Mack column must be checkboxes (or plain text) and Notes must be plain text. ' +
+      'Fix that, then try again.', ui.ButtonSet.OK);
     return;
   }
 
   const url = 'https://docs.google.com/spreadsheets/d/' + file.getId();
   const html = '<div style="font:14px Arial,sans-serif;line-height:1.5">' +
-    '<p><b>' + rows.length + ' warranties</b> are in the file and marked as sent today.</p>' +
+    '<p><b>' + rows.length + ' warranties</b>' + (range ? ' sold ' + span : '') +
+    ' are in the file. Their Sent to Mack boxes are ticked, with a note saying which file.</p>' +
+    (pick.undated ? '<p>Left out because they have no warranty date: ' + pick.undated + '</p>' : '') +
     '<p><a href="' + url + '/export?format=xlsx" target="_blank">Download the .xlsx for Mack</a><br>' +
     '<a href="' + url + '" target="_blank">Open it in Google Sheets</a></p>' +
     (cancel.length ? '<p style="color:#a61c00"><b>Also tell Mack to cancel these (returned after they were sent):</b><br>' +
@@ -625,25 +653,109 @@ function makeMackFile() {
   ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(260), 'File for Mack');
 }
 
-// Marks the warranties in Mack's file as sent. If one can't be marked, the
+/**
+ * Pure: which Registrations rows go in Mack's file. range is null (every row
+ * that is ready) or {from, to}: warranty sale dates, both days included.
+ * Cancellations are listed whatever the dates, since they always need doing.
+ */
+function pickForMackFile_(regs, regStatuses, range) {
+  const out = { ready: [], needCode: [], fixing: [], cancel: [], undated: 0 };
+  regs.forEach(function (r, i) {
+    const st = regStatuses[i];
+    if (st === 'Cancel with Mack') { out.cancel.push(i); return; }
+    if (range) {
+      const sold = warrantyDate_(r);
+      if (!sold) {
+        if (st === 'Ready to send') out.undated++;
+        return;
+      }
+      if (sold < range.from || sold > range.to) return;
+    }
+    if (st === 'Ready to send') out.ready.push(i);
+    else if (st === 'Needs WarrType code') out.needCode.push(i);
+    else if (st === 'Needs fixing') out.fixing.push(i);
+  });
+  return out;
+}
+
+// The day the warranty was sold (Mack's ServiceContractPurchaseDate).
+function warrantyDate_(r) {
+  const v = r[M['ServiceContractPurchaseDate']];
+  const d = v instanceof Date ? v : parseMackDate_(String(v || '').trim());
+  return d ? startOfDay_(d) : null;
+}
+
+/**
+ * Pure: a date range typed by a person. Blank means everything (null).
+ * Takes "10-01-2026 to 10-15-2026", "10/1/26 - 10/15/26", "10/1 through
+ * 10/15" (this year) or one date (just that day). Returns {from, to} or
+ * {error} with a message for the person.
+ */
+function parseDateRange_(text, today) {
+  const s = String(text || '').trim();
+  if (!s) return null;
+  const found = s.match(/\d{1,2}([\/.-])\d{1,2}(?:\1\d{2,4})?/g) || [];
+  const help = ' Type two dates like 10-01-2026 to 10-15-2026, or leave it blank to send everything.';
+  if (!found.length || found.length > 2) return { error: 'That date range could not be read.' + help };
+  const dates = found.map(function (d) { return parseLooseDate_(d, today); });
+  if (dates.some(function (d) { return !d; })) return { error: 'One of those dates does not exist.' + help };
+  let from = dates[0], to = dates[dates.length - 1];
+  if (from > to) { const swap = from; from = to; to = swap; }
+  const yearMs = 366 * 86400000;
+  if (Math.abs(from - startOfDay_(today)) > yearMs || Math.abs(to - startOfDay_(today)) > yearMs) {
+    return { error: 'Check the year: ' + mmddyyyy_(from) + ' to ' + mmddyyyy_(to) + ' is more than a year from today.' };
+  }
+  return { from: from, to: to };
+}
+
+function parseLooseDate_(text, today) {
+  const m = /^(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?$/.exec(text);
+  if (!m) return null;
+  let year = m[3] ? Number(m[3]) : today.getFullYear();
+  if (year < 100) year += 2000;
+  const month = Number(m[1]), day = Number(m[2]);
+  const d = new Date(year, month - 1, day);
+  return d.getMonth() === month - 1 && d.getDate() === day ? d : null;
+}
+
+// Ticks Sent to Mack for the warranties in Mack's file (a checkbox works in
+// a Sheets table) and notes the date and file. If one can't be marked, the
 // ones already marked are put back, so nothing looks sent that wasn't.
-function markSent_(regSh, regs, ready, rows, today) {
+function markSent_(regSh, regs, ready, rows, today, fileName) {
   const marked = [];
   try {
     ready.forEach(function (i, k) {
-      const cell = regSh.getRange(i + 2, T['Sent to Mack'] + 1);
-      tryFormat_(function () { cell.setNumberFormat('@'); });
-      cell.setValue(today);
       marked.push(i);
+      regSh.getRange(i + 2, T['Sent to Mack'] + 1).setValue(true);
+      regSh.getRange(i + 2, T['Notes'] + 1).setValue(
+        addNote_(regs[i][T['Notes']], 'Sent to Mack ' + today + ' in "' + fileName + '".'));
       regSh.getRange(i + 2, M['WarrType'] + 1).setValue(rows[k][M['WarrType']]);
     });
     return null;
   } catch (err) {
     marked.forEach(function (i) {
       regSh.getRange(i + 2, T['Sent to Mack'] + 1).setValue(regs[i][T['Sent to Mack']]);
+      regSh.getRange(i + 2, T['Notes'] + 1).setValue(regs[i][T['Notes']]);
     });
     return err;
   }
+}
+
+function addNote_(notes, note) {
+  const before = String(notes || '').trim();
+  return before ? before + ' ' + note : note;
+}
+
+// When a registration went to Mack, for the panel: a date typed in the
+// column, the date from the "Sent to Mack ..." note when the box is ticked,
+// or "already" when neither says.
+function sentOn_(reg) {
+  const v = reg[T['Sent to Mack']];
+  if (!v) return '';
+  if (v instanceof Date) return fmtDate_(v);
+  const noted = /Sent to Mack (\d{2}-\d{2}-\d{4})/.exec(String(reg[T['Notes']] || ''));
+  if (noted) return noted[1];
+  return v === true || String(v).toUpperCase() === 'TRUE' ? 'already' : String(v);
 }
 
 function listNote_(idx, regs, what) {
@@ -822,7 +934,7 @@ function importFormsOnFire() {
   }
   const sent = ui.alert('Already sent to Mack?',
     'Has Melinda already sent these ' + records.length + ' warranties to Mack from Forms on Fire?\n\n' +
-    'Yes: they are marked "' + FOF_SENT_LABEL + '" and stay out of the next file.\n' +
+    'Yes: their Sent to Mack boxes are ticked ("' + FOF_SENT_LABEL + '" in Notes) and they stay out of the next file.\n' +
     'No: they go into the next file. Rows that need fixing wait until they are fixed.',
     ui.ButtonSet.YES_NO_CANCEL);
   if (sent !== ui.Button.YES && sent !== ui.Button.NO) return;
@@ -945,8 +1057,8 @@ function fofRegistrations_(records, sold, regs, codes, sentLabel, now) {
     row[T['Customer ID']] = unit ? String(unit[S['Customer ID']]) : '';
     row[T['Saved From']] = 'Forms on Fire';
     row[T['Saved At']] = parseFofTime_(f['Completed']) || now;
-    row[T['Sent to Mack']] = sentLabel || '';
-    row[T['Notes']] = 'Forms on Fire #' + f['Row Id'] + ': ' + (years ? years + ' yr, ' : '') +
+    row[T['Sent to Mack']] = sentLabel ? true : '';
+    row[T['Notes']] = (sentLabel ? sentLabel + '. ' : '') + 'Forms on Fire #' + f['Row Id'] + ': ' + (years ? years + ' yr, ' : '') +
       (cov ? 'up to ' + money_(cov) + ', ' : '') + 'entered by ' + (f['salesPersonName'] || 'unknown') + '.';
     row[T['Registration ID']] = id;
     row[T['Problems']] = problems.join(' ');
@@ -1113,6 +1225,108 @@ function readKits_() {
   return out;
 }
 
+// The kit list from Railway (kits.py) onto the Kits tab. Pure: rows in,
+// changes out. Rows match by Lightspeed item ID, else by name. Blank cells
+// get Railway's camera and lenses; anything a person typed stays.
+function mergeKits_(rows, kits) {
+  const width = KIT_HEADERS.length;
+  const byId = {}, byName = {};
+  rows.forEach(function (r, i) {
+    const id = String(r[K['Lightspeed item ID']] || '').trim();
+    if (id && !(id in byId)) byId[id] = i;
+    const name = normKit_(r[K['Lightspeed kit item']]);
+    if (name && !(name in byName)) byName[name] = i;
+  });
+  const changed = {}, added = [];
+  let filled = 0;
+  (kits || []).forEach(function (kit) {
+    const lenses = kit.lenses || [];
+    const want = [kit.camera || '', lenses[0] || '', lenses[1] || ''];
+    const cols = [K['Camera model for Mack'], K['Lens 1 model for Mack'], K['Lens 2 model for Mack (two-lens kits)']];
+    const id = String(kit.item_id || '');
+    let i = id && id in byId ? byId[id] : undefined;
+    const byIdMatch = i !== undefined;
+    if (i === undefined) i = byName[normKit_(kit.name)];
+    if (i === undefined) {
+      const row = new Array(width).fill('');
+      row[K['Lightspeed kit item']] = kit.name || '';
+      cols.forEach(function (c, j) { row[c] = want[j]; });
+      row[K['Filled in by']] = kitLabel_(kit, row);
+      row[K['Lightspeed item ID']] = id;
+      row[K['Manufacturer SKU']] = kit.sku || '';
+      row[K['UPC']] = kit.upc || '';
+      added.push(row);
+      if (id) byId[id] = -1;
+      byName[normKit_(kit.name)] = -1;
+      return;
+    }
+    if (i < 0) return;   // the same Lightspeed item twice in one list
+    const row = rows[i].slice();
+    while (row.length < width) row.push('');
+    const before = JSON.stringify(row);
+    if (byIdMatch && normKit_(row[K['Lightspeed kit item']]) !== normKit_(kit.name)) {
+      row[K['Lightspeed kit item']] = kit.name;   // renamed in Lightspeed
+    }
+    let filledHere = false;
+    cols.forEach(function (c, j) {
+      if (!String(row[c] || '').trim() && want[j]) { row[c] = want[j]; filledHere = true; }
+    });
+    const label = String(row[K['Filled in by']] || '');
+    if (/^(From the|Check the lens|NEEDS A PERSON)/.test(label) || (!label && filledHere)) {
+      const same = cols.every(function (c, j) { return String(row[c] || '').trim() === want[j]; });
+      row[K['Filled in by']] = same ? kitLabel_(kit, row) : 'Changed by a person';
+    }
+    [['Lightspeed item ID', id], ['Manufacturer SKU', kit.sku], ['UPC', kit.upc]].forEach(function (p) {
+      if (!String(row[K[p[0]]] || '').trim() && p[1]) row[K[p[0]]] = String(p[1]);
+    });
+    if (JSON.stringify(row) !== before) {
+      changed[i] = row;
+      if (filledHere) filled++;
+    }
+  });
+  return { changed: changed, added: added, filled: filled };
+}
+
+function kitLabel_(kit, row) {
+  if (!String(row[K['Lens 1 model for Mack']] || '').trim() || !kit.complete) return KIT_NEEDS_PERSON;
+  if (kit.check) return 'Check the lens (a best guess)';
+  return kit.source === 'UPC lookup' ? 'From the UPC lookup' : 'From the item name';
+}
+
+function syncKits_(kits) {
+  const sh = sheet_(KITS_TAB);
+  const width = KIT_HEADERS.length;
+  const head = sh.getRange(1, 1, 1, width).getValues()[0];
+  if (!String(head[K['Filled in by']] || '').trim()) {
+    sh.getRange(1, K['Filled in by'] + 1, 1, width - K['Filled in by'])
+      .setValues([KIT_HEADERS.slice(K['Filled in by'])]).setFontWeight('bold');
+  }
+  const rows = readRows_(sh, width);
+  const res = mergeKits_(rows, kits);
+  Object.keys(res.changed).forEach(function (i) {
+    sh.getRange(Number(i) + 2, 1, 1, width).setValues([res.changed[i]]);
+  });
+  if (res.added.length) {
+    res.added.sort(function (a, b) { return String(a[0]).toLowerCase() < String(b[0]).toLowerCase() ? -1 : 1; });
+    sh.getRange(rows.length + 2, 1, res.added.length, width).setValues(res.added);
+  }
+  return { ok: true, v: VERSION, kits: (kits || []).length, added: res.added.length, filled: res.filled,
+           changed: Object.keys(res.changed).length };
+}
+
+function updateKitsFromLightspeed() {
+  const ui = ui_();
+  const res = UrlFetchApp.fetch(APP_URL.replace(/\/$/, '') + '/mack/kits/sync', {
+    method: 'post', headers: { 'X-Mack-Secret': SECRET }, muteHttpExceptions: true,
+  });
+  let data = {};
+  try { data = JSON.parse(res.getContentText()); } catch (err) {}
+  tell_(ui, data.ok
+    ? 'Reading the cameras in Lightspeed. The Kits tab fills in within a few minutes (kits whose names ' +
+      'don\'t say the lens are looked up online, about 6 a minute). It also updates by itself twice a day.'
+    : 'The follow-up app could not start that: ' + (data.error || 'HTTP ' + res.getResponseCode()));
+}
+
 // Kit items seen in the panel get a blank row on the Kits tab to fill in.
 function addNewKits_(lines) {
   const words = splitList_(readSettings_()[5]).map(function (w) { return w.toLowerCase(); });
@@ -1251,13 +1465,12 @@ function ensureSetup_() {
   }
   if (!ss.getSheetByName(KITS_TAB)) {
     const sh = ss.insertSheet(KITS_TAB);
-    sh.getRange(1, 1, 1, 5).setValues([['Lightspeed kit item', 'Camera model for Mack', 'Lens 1 model for Mack',
-      'Lens 2 model for Mack (two-lens kits)', 'Notes']]).setFontWeight('bold');
+    sh.getRange(1, 1, 1, KIT_HEADERS.length).setValues([KIT_HEADERS]).setFontWeight('bold');
     sh.setFrozenRows(1);
     sh.setColumnWidth(1, 340);
     [2, 3, 4].forEach(function (c) { sh.setColumnWidth(c, 220); });
-    sh.getRange(1, 1).setNote('Type or paste the kit name as it appears in Lightspeed (a "+" at the end does not matter). ' +
-      'The panel uses these names instead of splitting the item name. Kits looked up in the panel are added here automatically.');
+    sh.getRange(1, 1).setNote('Filled from Lightspeed\'s cameras twice a day (Mack > Update the Kits tab from Lightspeed ' +
+      'does it now). Anything you type here wins and is never overwritten. A "+" at the end of a name does not matter.');
     sh.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied('=AND($A2<>"",$B2="")').setBackground('#fce5cd')
       .setRanges([sh.getRange('B2:C')]).build()]);

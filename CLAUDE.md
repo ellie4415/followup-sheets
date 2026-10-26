@@ -65,6 +65,16 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
   `Mack lookup <n>: lookup data .., find .., lines .., items .., total ..`
   and returns the same numbers as `timing`. Don't reintroduce sequential awaits here.
 
+- **Quick check (Oct 26 2026).** Staff expect a warranty in the Mack panel
+  minutes after the sale, and the hourly run alone made them wait up to an
+  hour. `mack_quick_loop` runs `mack_quick_check` every `MACK_QUICK_MINUTES`
+  (default 2; 0 turns it off) during open hours, skipping while the hourly
+  run is going: it reads the newest `MACK_QUICK_WINDOW` (40) sales, reads
+  lines only for completed sales it hasn't seen (`mack_quick_seen`, last
+  400 IDs; open carts get another look next time), queues Mack units and
+  sends at once. The hourly run is still the backstop; the sheet dedups.
+  `send_outbox` removes only the units it sent, since both can queue units
+  during a send. Result in `/api/status` as `mack_quick`.
 - **Units.** One per warranty: `<saleLineID>-<n>` sold, `R<saleLineID>-<n>`
   returned (`reverses` = SaleLine.parentSaleLineID). Detected for EVERY shop,
   refunds and walk-ins included, so the hook sits BEFORE the shop/refund
@@ -202,4 +212,5 @@ under a qualifying category root OR total ≥ threshold).
 | `templates/index.html` | Status page: connection, config checklist, Run now, last-run summary |
 
 State keys: `tokens` (JSON: access/refresh/account_id), `cursor` (max
-processed saleID), `last_run` / `next_run` (display).
+processed saleID), `last_run` / `next_run` (display), `mack_quick_seen`,
+`last_mack_quick` (quick check).

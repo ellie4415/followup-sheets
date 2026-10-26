@@ -195,12 +195,15 @@ def outbox_add(units: list) -> None:
 
 
 async def send_outbox() -> dict:
-    """Send pending units to the Mack sheet. Leaves them queued on failure."""
+    """Send pending units to the Mack sheet. Leaves them queued on failure.
+    Only the units actually sent leave the outbox: the quick check and the
+    hourly run can both be adding units while a send is on its way."""
     box = store.get_json(OUTBOX_KEY, []) or []
     if not box:
         return {"sent": 0, "added": 0}
     data = await _bridge_post({"action": "sold", "units": box})
-    store.set_json(OUTBOX_KEY, [])
+    sent = {u.get("key") for u in box}
+    store.set_json(OUTBOX_KEY, [u for u in store.get_json(OUTBOX_KEY, []) or [] if u.get("key") not in sent])
     return {"sent": len(box), "added": int(data.get("added") or 0)}
 
 

@@ -982,6 +982,61 @@ async def scheduler_loop() -> None:
                 log.exception("Weekly job crashed")
 
 
+# ── Mack quick check (Oct 26 2026) ────────────────────────────────────────────
+# Staff expect a warranty in the Mack panel minutes after the sale, not at the
+# next hourly run. Every MACK_QUICK_MINUTES during open hours this looks at the
+# newest sales only and sends any Mack warranties straight to the sheet. The
+# hourly run (and its open-cart watch list) still sends everything as the
+# backstop; the sheet ignores units it already has.
+
+MACK_QUICK_MINUTES = float(os.environ.get("MACK_QUICK_MINUTES", "2"))
+MACK_QUICK_WINDOW  = 40    # newest sales looked at each time (a few hours of both stores)
+MACK_QUICK_SEEN    = 400   # completed sale IDs remembered so each is read once
+
+
+async def mack_quick_check() -> dict:
+    client = await get_client()
+    ctx = await _mack_context(client)
+    data = await client.get("Sale.json", params={"sort": "-saleID", "limit": MACK_QUICK_WINDOW})
+    seen = set(store.get_json("mack_quick_seen", []) or [])
+    looked, units, cache = 0, [], {}
+    for sale in ls.as_list(data.get("Sale")):
+        sid = str(sale.get("saleID") or "")
+        if not sid or sid in seen or str(sale.get("completed")) != "true":
+            continue   # an open cart gets another look next time
+        if str(sale.get("voided")) != "true":
+            looked += 1
+            lines = await _lines_for(client, sale)
+            if any(mk.is_mack(mk.line_name(l)) for l in lines):
+                cust = await _customer_for(client, sale, cache)
+                units += mk.sold_units(sale, lines, ctx.get("shops", {}).get(str(sale.get("shopID", "")), ""),
+                                       ctx.get("employees", {}), cust)
+        seen.add(sid)
+    mk.outbox_add(units)
+    store.set_json("mack_quick_seen", sorted(seen, key=int)[-MACK_QUICK_SEEN:])
+    res = await mk.send_outbox() if units else {"sent": 0, "added": 0}
+    if res["added"]:
+        log.info(f"Mack quick check: {res['added']} new warranty unit(s) on the Mack sheet")
+    return {"looked": looked, "found": len(units), **res}
+
+
+async def mack_quick_loop() -> None:
+    while MACK_QUICK_MINUTES > 0:
+        await asyncio.sleep(MACK_QUICK_MINUTES * 60)
+        now = datetime.now(tz=PACIFIC)
+        if not mk.enabled() or _job_running or not (RUN_HOURS_START <= now.hour <= RUN_HOURS_END):
+            continue   # the hourly run handles Mack sales while it runs
+        result = {"at": now.strftime("%-m/%-d/%Y %-I:%M %p"), "ok": False, "error": ""}
+        try:
+            result.update(await asyncio.wait_for(mack_quick_check(), timeout=240), ok=True)
+        except ls.AuthExpired as exc:
+            result["error"] = str(exc)   # the hourly run reports this loudly
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            log.warning(f"Mack quick check failed (nothing lost, the hourly run sends it): {exc}")
+        store.set_json("last_mack_quick", result)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # Route uvicorn's own loggers (server + access lines) to stdout too —
@@ -994,6 +1049,7 @@ async def startup() -> None:
         lg.propagate = False
     store.init()
     asyncio.create_task(scheduler_loop())
+    asyncio.create_task(mack_quick_loop())
     warm_mack_context()
 
 
@@ -1040,6 +1096,7 @@ async def api_status():
         "running":   _job_running,
         "last_run":  store.get_json("last_run"),
         "next_run":  store.get("next_run", ""),
+        "mack_quick": store.get_json("last_mack_quick"),
     }
 
 
