@@ -1339,6 +1339,74 @@ async def debug_sale(number: str):
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
 
+# ── Lab balance SKUs: a read-only look (Nov 2026) ─────────────────────────────
+# A layaway ticket came back with no lines and a $0 total, so the lab's balance
+# SKUs have to be read by item. IDs, amounts and flags only: this route has no
+# secret, so no names, emails or card details.
+
+BALANCE_ITEM_MATCH = "AC LAB BALANCE DUE"
+_ITEM_FIELDS = ("itemID", "description", "systemSku", "categoryID", "tax", "archived")
+_LINE_FIELDS = ("saleLineID", "saleID", "itemID", "customerID", "employeeID", "shopID",
+                "isLayaway", "isWorkorder", "isSpecialOrder", "unitQuantity", "unitPrice",
+                "calcTotal", "calcSubtotal", "createTime", "timeStamp", "parentSaleLineID")
+_PAY_FIELDS  = ("salePaymentID", "saleID", "amount", "createTime", "archived", "paymentTypeID",
+                "creditAccountID", "ccChargeID", "refPaymentID", "registerID", "employeeID")
+_SALE_FIELDS = ("saleID", "customerID", "employeeID", "shopID", "completed", "voided", "archived",
+                "createTime", "updateTime", "completeTime", "timeStamp", "calcTotal",
+                "calcPayments", "balance", "total", "totalDue", "quoteID")
+
+
+def _only(row: dict, fields: tuple) -> dict:
+    return {k: row.get(k) for k in fields}
+
+
+async def _read_or_error(client: ls.LightspeedClient, path: str, params: dict, key: str) -> list:
+    """Rows, or one {"error": ...} row, so one refused query can't hide the rest."""
+    try:
+        return ls.as_list((await client.get(path, params=params)).get(key))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            raise
+        return [{"error": f"{exc.response.status_code} on {path}"}]
+
+
+@app.get("/debug-balance")
+async def debug_balance(sale: str = ""):
+    """The balance SKUs' lines, plus one sale's payments if `sale` is given."""
+    try:
+        client = await get_client()
+        items = await _read_or_error(client, "Item.json", {
+            "description": f"~,{BALANCE_ITEM_MATCH}%", "limit": 10}, "Item")
+        out = {"items": [], "sale": None}
+        for item in items:
+            if "error" in item:
+                out["items"].append(item)
+                continue
+            lines = await _read_or_error(client, "SaleLine.json", {
+                "itemID": item.get("itemID"), "sort": "-saleLineID", "limit": 20}, "SaleLine")
+            out["items"].append({
+                **_only(item, _ITEM_FIELDS),
+                "lines": [l if "error" in l else _only(l, _LINE_FIELDS) for l in lines],
+            })
+        if sale.isdigit():
+            found = await client.find_sale(sale)
+            pays  = await client.get_sale_payments(sale)
+            lines = await _read_or_error(client, "SaleLine.json", {"saleID": sale, "limit": 100}, "SaleLine")
+            out["sale"] = {
+                "sale":     _only(found or {}, _SALE_FIELDS),
+                "lines":    [l if "error" in l else _only(l, _LINE_FIELDS) for l in lines],
+                "payments": [{**_only(p, _PAY_FIELDS),
+                              "type": (p.get("PaymentType") or {}).get("name", "")} for p in pays],
+                "payment_keys": sorted({k for p in pays for k in p}),
+            }
+        return out
+    except ls.AuthExpired as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:
+        log.exception("debug-balance failed")
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
 # ── Mack warranties (see mack.py) ─────────────────────────────────────────────
 
 _mack_ctx: dict = {}
