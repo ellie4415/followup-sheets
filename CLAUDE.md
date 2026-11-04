@@ -126,6 +126,16 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
 - Tests: `python tests/test_mack.py` (needs requirements installed) and
   `jsc docs/mack-bridge.gs tests/test_mack_bridge.js`.
 
+## Lab balances (Nov 2026)
+
+`GET /lab-balances?sales=<original sale IDs>` is how lab-sync learns that a
+balance was rung up or paid, so lab-sync's own Lightspeed connection (and its
+frozen sync path) stays out of it. Read-only, no secret: it returns balance SKU
+lines and deposits only, never names or other purchases. The rules live in
+lab-sync's `balances.py`. `/debug-balance?sale=N` shows the raw fields. What
+live tests showed is at the top of that section of `main.py`; the two SKU item
+IDs are in `BALANCE_ITEM_IDS`. Tests: `tests/test_lab_balances.py`.
+
 **Sales of the Week (manager sheet, Sept 2026):** `weekly_job` runs after
 the last sync of WEEKLY_DAY (Thursday, 8 PM) and via POST /weekly. It
 scans ALL transactions of the past 7 days (no camera/threshold filter),

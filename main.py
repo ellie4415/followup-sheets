@@ -1407,6 +1407,125 @@ async def debug_balance(sale: str = ""):
         return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=500)
 
 
+# ── Lab balances: what the lab log asks about (Nov 2026) ──────────────────────
+# The lab log reads this every few minutes while it has unpaid balances, so its
+# own Lightspeed connection stays out of it. Facts only, no rules (those live in
+# lab-sync's balances.py), and only balance SKU lines and deposits: no names and
+# no other purchases, which is why this route needs no secret.
+#
+# How it looks in Lightspeed, from live test tickets on Nov 4 2026:
+#   - A layaway line leaves the ticket at once: saleID 0, isLayaway true, the
+#     customer on the line. Pressing Finish Sale makes no difference to the line.
+#   - A payment link adds a NEW finished ticket when the customer pays: no lines,
+#     total 0, totalDue = what was paid, and two payments, the card in and the
+#     same amount out to the customer's account. An unpaid request adds nothing.
+
+BALANCE_ITEM_IDS  = ("16890", "16891")   # AC Lab Balance Due, AC Lab Balance Due- Hard Goods
+BALANCE_MAX_SALES = 50                   # orders one request can ask about
+BALANCE_TICKETS   = 10                   # newest tickets read per customer
+
+_balance_customers: dict = {}   # original sale -> customer, which never changes
+_balance_deposits: dict  = {}   # finished ticket -> its deposit or None, which never changes
+
+
+def _is_true(value) -> bool:
+    return str(value).lower() == "true"
+
+
+def _balance_line(line: dict, sold: bool) -> dict:
+    return {"line":    str(line.get("saleLineID") or ""),
+            "ticket":  str(line.get("saleID") or "0"),
+            "layaway": not sold,
+            "sold":    sold,
+            "qty":     _fnum(line.get("unitQuantity")),
+            "total":   _fnum(line.get("calcTotal")),
+            "created": line.get("createTime")}
+
+
+def _customer_lines(lines: list, customer: str, finished: set) -> list:
+    """This customer's balance SKU lines: on layaway, or on a finished ticket."""
+    out = []
+    for line in lines:
+        if _is_true(line.get("isLayaway")):
+            if str(line.get("customerID") or "0") == customer:
+                out.append(_balance_line(line, sold=False))
+        elif str(line.get("saleID") or "0") in finished:
+            out.append(_balance_line(line, sold=True))
+    return out
+
+
+def _maybe_deposit(sale: dict) -> bool:
+    """Worth reading the payments of: a finished, unvoided $0 ticket with money due."""
+    return (_is_true(sale.get("completed")) and not _is_true(sale.get("voided"))
+            and abs(_fnum(sale.get("calcTotal"))) < 0.005 and _fnum(sale.get("totalDue")) > 0)
+
+
+def _deposit(sale: dict, payments: list) -> Optional[dict]:
+    """Money in, and the same amount out to the customer's account. None if not."""
+    on_account = [p for p in payments if str(p.get("creditAccountID") or "0") != "0"]
+    money_in   = [p for p in payments if str(p.get("creditAccountID") or "0") == "0"]
+    paid   = sum(_fnum(p.get("amount")) for p in money_in)
+    placed = -sum(_fnum(p.get("amount")) for p in on_account)
+    if paid <= 0 or abs(paid - placed) > 0.01:
+        return None
+    return {"ticket": str(sale.get("saleID") or ""), "amount": round(paid, 2), "at": sale.get("createTime")}
+
+
+async def _sale_customer(client: ls.LightspeedClient, sale_id: str) -> str:
+    if sale_id not in _balance_customers:
+        data = await client.get(f"Sale/{sale_id}.json")
+        sale = data.get("Sale") if isinstance(data.get("Sale"), dict) else {}
+        _balance_customers[sale_id] = str(sale.get("customerID") or "0")
+    return _balance_customers[sale_id]
+
+
+async def _customer_activity(client: ls.LightspeedClient, customer: str, lines: list) -> dict:
+    data = await client.get("Sale.json", params={"customerID": customer, "sort": "-saleID",
+                                                 "limit": BALANCE_TICKETS})
+    tickets  = ls.as_list(data.get("Sale"))
+    finished = {str(t.get("saleID")) for t in tickets
+                if _is_true(t.get("completed")) and not _is_true(t.get("voided"))}
+    deposits = []
+    for ticket in tickets:
+        sid = str(ticket.get("saleID"))
+        if not _maybe_deposit(ticket):
+            continue
+        if sid not in _balance_deposits:
+            _balance_deposits[sid] = _deposit(ticket, await client.get_sale_payments(sid))
+        if _balance_deposits[sid]:
+            deposits.append(_balance_deposits[sid])
+    return {"lines": _customer_lines(lines, customer, finished), "deposits": deposits}
+
+
+@app.get("/lab-balances")
+async def lab_balances(sales: str = ""):
+    """`sales`: the original sale of each open balance, comma separated."""
+    wanted = [s.strip() for s in sales.split(",") if s.strip().isdigit()][:BALANCE_MAX_SALES]
+    try:
+        client = await get_client()
+        lines: list = []
+        for item in BALANCE_ITEM_IDS:
+            data = await client.get("SaleLine.json", params={"itemID": item, "sort": "-saleLineID",
+                                                             "limit": 100})
+            lines += ls.as_list(data.get("SaleLine"))
+        by_customer: dict = {}
+        answer: dict = {}
+        for sale_id in wanted:
+            customer = await _sale_customer(client, sale_id)
+            if customer == "0":
+                answer[sale_id] = {"lines": [], "deposits": []}
+                continue
+            if customer not in by_customer:
+                by_customer[customer] = await _customer_activity(client, customer, lines)
+            answer[sale_id] = by_customer[customer]
+        return {"ok": True, "sales": answer}
+    except ls.AuthExpired as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+    except Exception as exc:
+        log.exception("lab-balances failed")
+        return JSONResponse({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status_code=500)
+
+
 # ── Mack warranties (see mack.py) ─────────────────────────────────────────────
 
 _mack_ctx: dict = {}
