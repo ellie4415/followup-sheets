@@ -45,9 +45,13 @@ class Fake:
                                  line("172026", "0", "5119", "true", "10"),
                                  line("900", "108500", "0", "false", "7"),
                                  line("901", "108501", "0", "false", "8"),
-                                 line("902", "0", "4444", "true", "9")]}
+                                 line("902", "0", "4444", "true", "9"),
+                                 line("903", "108479", "5119", "true", "10"),    # completed layaway
+                                 line("904", "108481", "5119", "true", "11")]}   # being completed
         if path == "Sale.json":
-            return {"Sale": [ticket("108500", total="7"),            # plain sale, finished
+            return {"Sale": [ticket("108481", completed="false", total="11"),
+                             ticket("108479", total="10", due="10"),
+                             ticket("108500", total="7"),            # plain sale, finished
                              ticket("108501", completed="false"),    # plain sale, still a cart
                              ticket("108473", completed="false"),    # unfinished layaway
                              ticket("108470"),                       # finished layaway, unpaid
@@ -84,6 +88,10 @@ check("layaway lines found, finished or not", {"172022", "172025", "172026"} <= 
 check("layaway line is a layaway", ids["172022"]["layaway"] and not ids["172022"]["sold"])
 check("line on a finished ticket is sold", ids["900"]["sold"] and ids["900"]["ticket"] == "108500")
 check("line on an open cart doesn't count", "901" not in ids)
+check("completed layaway is sold, though it keeps its layaway flag",
+      ids["903"]["sold"] and not ids["903"]["layaway"] and ids["903"]["ticket"] == "108479")
+check("layaway on a ticket not finished yet is still a layaway",
+      ids["904"]["layaway"] and not ids["904"]["sold"])
 check("someone else's layaway doesn't count", "902" not in ids)
 check("the deposit", act["deposits"] == [{"ticket": "108468", "amount": 5.0,
                                           "at": "2026-11-04T22:28:00+00:00"}], act["deposits"])

@@ -1416,6 +1416,8 @@ async def debug_balance(sale: str = ""):
 # How it looks in Lightspeed, from live test tickets on Nov 4 2026:
 #   - A layaway line leaves the ticket at once: saleID 0, isLayaway true, the
 #     customer on the line. Pressing Finish Sale makes no difference to the line.
+#   - "Complete items on layaway" moves that SAME line (same ID, same createTime,
+#     isLayaway still true) onto the finished ticket that paid for it.
 #   - A payment link adds a NEW finished ticket when the customer pays: no lines,
 #     total 0, totalDue = what was paid, and two payments, the card in and the
 #     same amount out to the customer's account. An unpaid request adds nothing.
@@ -1443,14 +1445,14 @@ def _balance_line(line: dict, sold: bool) -> dict:
 
 
 def _customer_lines(lines: list, customer: str, finished: set) -> list:
-    """This customer's balance SKU lines: on layaway, or on a finished ticket."""
+    """This customer's balance SKU lines: on a finished ticket, or on layaway.
+    The ticket comes first, because a completed layaway keeps its layaway flag."""
     out = []
     for line in lines:
-        if _is_true(line.get("isLayaway")):
-            if str(line.get("customerID") or "0") == customer:
-                out.append(_balance_line(line, sold=False))
-        elif str(line.get("saleID") or "0") in finished:
+        if str(line.get("saleID") or "0") in finished:
             out.append(_balance_line(line, sold=True))
+        elif _is_true(line.get("isLayaway")) and str(line.get("customerID") or "0") == customer:
+            out.append(_balance_line(line, sold=False))
     return out
 
 
