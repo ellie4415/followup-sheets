@@ -365,3 +365,38 @@ eq(kitsRead['canon eos r6 ii 24-105 stm'], { camera: 'EOS R6 II', lenses: ['RF 2
 eq(pending_('').rules.kits['sony zv-e1 kit black'].lenses, ['FE 28-60mm F4-5.6'],
    'the waiting list carries the kit list to every register');
 print(failures ? failures + ' FAILURE(S)' : 'ALL V8 KIT TESTS PASSED');
+
+// v9: lens serials from the register popup live on the Lens Scans tab.
+var now9 = new Date(2026, 10, 25, 10, 0);
+var rows9 = lensScanRows_({ kits: [{ kit: 'Canon EOS R100 Double Lens Zoom Kit w/75-300', lenses: [{ model: 'RF-S 18-45mm', serial: ' 0123 ' }, { model: 'RF 75-300mm', serial: '7890' }] }],
+  sale: '#100241', saved_from: 'Reno computer' }, 'ab12cd34', now9);
+eq(rows9.length, 2, 'one row per lens');
+eq([rows9[0][SC['Serial']], rows9[0][SC['Sale']], rows9[1][SC['Lens']], rows9[1][SC['Scan ID']], rows9[0][SC['Used By']]],
+   ['0123', '100241', 'RF 75-300mm', 'ab12cd34', ''], 'serial trimmed and kept as typed, sale digits only, shared scan ID');
+eq(lensScanRows_({ kits: [{ kit: 'X Kit', lenses: [{ model: 'L', serial: 'N/A' }] }] }, 'x', now9).error, 'A lens serial is missing.', 'fake serial refused');
+eq(lensScanRows_({ kits: [] }, 'x', now9).error, 'Nothing to save.', 'empty save refused');
+eq(lensScanRows_({ kits: [{ kit: '', lenses: [{ model: 'L', serial: '1' }] }] }, 'x', now9).error, 'The kit or its lens is missing.', 'kit name required');
+eq(lensScanRows_({ kits: [{ kit: 'G100 Kit', lenses: [{ model: 'L', serial: '%XA0TEST0001' }] }] }, 'x', now9)[0][SC['Serial']], '%XA0TEST0001', 'a % in a serial is kept');
+
+function scanRow(id, kit, lens, serial, at, used) {
+  var r = new Array(SCAN_HEADERS.length).fill('');
+  r[SC['Scan ID']] = id; r[SC['Kit']] = kit; r[SC['Lens']] = lens; r[SC['Serial']] = serial;
+  r[SC['Scanned At']] = at; r[SC['Used By']] = used || ''; return r;
+}
+var day = 86400000;
+var tab = [
+  scanRow('aaaaaaaa', 'Canon R100 Kit w/75-300 +', 'RF-S 18-45mm', '111', new Date(now9 - 2 * day)),
+  scanRow('aaaaaaaa', 'Canon R100 Kit w/75-300 +', 'RF 75-300mm', '222', new Date(now9 - 2 * day)),
+  scanRow('bbbbbbbb', 'Panasonic G100 Kit', '12-32mm', '333', new Date(now9 - 1 * day), '0a1b2c3d'),   // used
+  scanRow('cccccccc', 'Panasonic G100 Kit', '12-32mm', '444', new Date(now9 - 40 * day)),               // too old
+  scanRow('dddddddd', 'Panasonic G100 Kit', '12-32mm', '555', new Date(now9 - 1 * day)),
+  scanRow('eeeeeeee', 'Panasonic G100 Kit', '12-32mm', '', new Date(now9 - 1 * day)),                  // serial erased by hand
+];
+var open9 = openLensScans_(tab, now9);
+eq(open9.map(function (x) { return [x.id, x.kit, x.lenses.map(function (l) { return l.serial; })]; }),
+   [['dddddddd', 'panasonic g100 kit', ['555']], ['aaaaaaaa', 'canon r100 kit w/75-300', ['111', '222']]],
+   'open scans: unused, recent, grouped per save, newest first, kit key matches the panel');
+var want9 = {}; want9['aaaaaaaa'] = true; want9['bbbbbbbb'] = true;
+eq(lensRowsToMark_(tab, want9), [0, 1], 'mark both lenses of the used save, never re-mark a used one');
+eq(markLensScansUsed_(['not an id'], 'x'), 0, 'junk scan IDs are ignored without touching the sheet');
+print(failures ? failures + ' FAILURE(S)' : 'ALL V9 LENS SCAN TESTS PASSED');

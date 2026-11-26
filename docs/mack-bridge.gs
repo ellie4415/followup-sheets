@@ -14,6 +14,10 @@
  *     Lightspeed's cameras twice a day (version 8); rows a person typed are
  *     never overwritten. "NEEDS A PERSON" rows want the lens typed in.
  *   - Staff tab: who gets reminder emails.
+ *   - Lens Scans tab (version 9): lens serials scanned in the register's
+ *     kit popup. The Mack panel fills them in on any computer; "Used By"
+ *     shows which registration used each one. Nothing here is lost when a
+ *     computer's Chrome is reset or not synced.
  *   - Mack menu: make the file for Mack, load past warranties, import a
  *     Forms on Fire export, update the Kits tab, refresh, reminders on/off.
  *   - Problems column (Registrations): anything wrong with a row. A row with
@@ -37,7 +41,7 @@
 const SECRET    = 'PASTE_SECRET_HERE';      // shared with Railway (MACK_SECRET)
 const STAFF_KEY = 'PASTE_STAFF_KEY_HERE';   // shared with the Chrome extension
 const APP_URL   = 'https://followup-sheets-production.up.railway.app';
-const VERSION   = 8;
+const VERSION   = 9;
 
 const REG_TAB = 'Registrations';
 const SOLD_TAB = 'Sold';
@@ -50,6 +54,11 @@ const K = {};   // Kits tab column index (0-based) by header
 KIT_HEADERS.forEach(function (h, i) { K[h] = i; });
 const KIT_NEEDS_PERSON = 'NEEDS A PERSON: type the lens (Lightspeed and the UPC lookup don\'t say)';
 const SETTINGS_TAB = 'Settings';
+const SCANS_TAB = 'Lens Scans';
+const SCAN_HEADERS = ['Scanned At', 'Saved From', 'Kit', 'Lens', 'Serial', 'Sale', 'Used By', 'Scan ID'];
+const SC = {};   // Lens Scans tab column index (0-based) by header
+SCAN_HEADERS.forEach(function (h, i) { SC[h] = i; });
+const SCAN_OFFER_DAYS = 30;   // unused scans offered to the panel this long (Mack allows 30 days)
 const FILE_TAB_NAME = 'API  use dates or po#';   // Mack's template tab name (two spaces)
 
 // Mack's upload columns, A to AB, in Melinda's exact order.
@@ -127,6 +136,10 @@ function doPost(e) {
     if (body.key === STAFF_KEY && body.action === 'register') {
       ensureSetup_();
       return json_(withLock_(function () { return register_(body.registration || {}); }));
+    }
+    if (body.key === STAFF_KEY && body.action === 'lens') {
+      ensureSetup_();
+      return json_(withLock_(function () { return addLensScans_(body.scan || {}); }));
     }
     if (body.secret) return json_({ error: body.secret === SECRET ? 'bad request' : 'bad secret' });
     return json_({ error: body.key === STAFF_KEY ? 'bad request' : 'bad key' });
@@ -239,6 +252,7 @@ function register_(reg) {
   // registered"): the waiting list works statuses out live (pending_) and
   // puts them back in the sheet, and the error lands in Executions.
   try {
+    markLensScansUsed_(reg.lens_scans, id);
     addNewCodesAndStaff_([{ item: reg.warranty_item, salesperson: reg.salesperson }]);
     refreshStatuses_();
   } catch (err) {
@@ -519,14 +533,106 @@ function saleForPanel_(n) {
       });
     });
   }
-  return { ok: true, v: VERSION, sale: bundle, units: units, previous: previous, rules: rules_() };
+  return { ok: true, v: VERSION, sale: bundle, units: units, previous: previous, rules: rules_(),
+           lens_scans: openLensScans_(readRows_(sheet_(SCANS_TAB), SCAN_HEADERS.length), new Date()) };
 }
 
 function gearForPanel_(n) {
   const bundle = fetchSale_(n);
   if (bundle.error) return { ok: false, error: bundle.error };
   addNewKits_(bundle.lines);
-  return { ok: true, v: VERSION, sale: bundle };
+  return { ok: true, v: VERSION, sale: bundle,
+           lens_scans: openLensScans_(readRows_(sheet_(SCANS_TAB), SCAN_HEADERS.length), new Date()) };
+}
+
+// ── Lens serials scanned at the register (from the extension's popup) ─────
+
+// One popup save: { kits: [{ kit, lenses: [{ model, serial }] }], sale,
+// saved_from }. Every lens is one row; lenses saved together share a Scan ID.
+function addLensScans_(scan) {
+  const id = Utilities.getUuid().slice(0, 8);
+  const rows = lensScanRows_(scan, id, new Date());
+  if (rows.error) return { ok: false, error: rows.error };
+  const sh = sheet_(SCANS_TAB);
+  const start = sh.getLastRow() + 1;
+  const range = sh.getRange(start, 1, rows.length, SCAN_HEADERS.length);
+  // Serials stay text, so a leading 0 is never dropped.
+  tryFormat_(function () { range.setNumberFormat('@'); });
+  range.setValues(rows);
+  tryFormat_(function () { sh.getRange(start, SC['Scanned At'] + 1, rows.length, 1).setNumberFormat('mm-dd-yyyy h:mm am/pm'); });
+  return { ok: true, id: id, rows: rows.length };
+}
+
+// Pure: the rows for one popup save, or { error } when something is missing.
+function lensScanRows_(scan, id, now) {
+  const kits = (scan && scan.kits) || [];
+  const rows = [];
+  for (let i = 0; i < kits.length; i++) {
+    const kit = String(kits[i].kit || '').trim();
+    const lenses = kits[i].lenses || [];
+    if (!kit || !lenses.length) return { error: 'The kit or its lens is missing.' };
+    for (let j = 0; j < lenses.length; j++) {
+      const serial = String(lenses[j].serial || '').trim();
+      if (!realSerial_(serial)) return { error: 'A lens serial is missing.' };
+      const row = new Array(SCAN_HEADERS.length).fill('');
+      row[SC['Scanned At']] = now;
+      row[SC['Saved From']] = String(scan.saved_from || '').slice(0, 60);
+      row[SC['Kit']] = kit.slice(0, 200);
+      row[SC['Lens']] = String(lenses[j].model || '').trim().slice(0, 120);
+      row[SC['Serial']] = serial.slice(0, 60);
+      row[SC['Sale']] = String(scan.sale || '').replace(/[^\d]/g, '').slice(0, 14);
+      row[SC['Scan ID']] = id;
+      rows.push(row);
+    }
+  }
+  if (!rows.length) return { error: 'Nothing to save.' };
+  if (rows.length > 12) return { error: 'Too many lenses in one save.' };
+  return rows;
+}
+
+// Pure: scans the panel can still use (Used By blank, recent), grouped back
+// into one entry per popup save and kit, newest first. A serial fixed by
+// hand on the tab is what the panel gets.
+function openLensScans_(rows, now) {
+  const cutoff = now.getTime() - SCAN_OFFER_DAYS * 86400000;
+  const byKey = {}, out = [];
+  rows.forEach(function (r) {
+    const at = r[SC['Scanned At']] instanceof Date ? r[SC['Scanned At']].getTime() : NaN;
+    const id = String(r[SC['Scan ID']] || '');
+    const serial = String(r[SC['Serial']] || '').trim();
+    if (!id || String(r[SC['Used By']] || '').trim() || !realSerial_(serial) || !(at >= cutoff)) return;
+    const kit = String(r[SC['Kit']] || '').trim();
+    const key = id + '|' + normKit_(kit);
+    if (!byKey[key]) {
+      byKey[key] = { id: id, kit: normKit_(kit), name: kit, lenses: [], sale: String(r[SC['Sale']] || ''),
+                     at: at, saved_from: String(r[SC['Saved From']] || '') };
+      out.push(byKey[key]);
+    }
+    byKey[key].lenses.push({ model: String(r[SC['Lens']] || ''), serial: serial });
+  });
+  out.sort(function (a, b) { return b.at - a.at; });
+  return out;
+}
+
+// After a registration is saved: the scans it used get its Registration ID.
+function markLensScansUsed_(ids, regId) {
+  const want = {};
+  (ids || []).forEach(function (x) { if (/^[0-9a-f]{8}$/.test(String(x))) want[String(x)] = true; });
+  if (!Object.keys(want).length) return 0;
+  const sh = sheet_(SCANS_TAB);
+  const rows = readRows_(sh, SCAN_HEADERS.length);
+  const hits = lensRowsToMark_(rows, want);
+  hits.forEach(function (i) { sh.getRange(i + 2, SC['Used By'] + 1).setValue(regId); });
+  return hits.length;
+}
+
+// Pure: row indexes (0-based, below the header) of unused scans with those IDs.
+function lensRowsToMark_(rows, want) {
+  const out = [];
+  rows.forEach(function (r, i) {
+    if (want[String(r[SC['Scan ID']])] && !String(r[SC['Used By']] || '').trim()) out.push(i);
+  });
+  return out;
 }
 
 function fetchSale_(n) {
@@ -769,12 +875,30 @@ function describeReg_(r) {
     r[M['EQMake']] + ' ' + r[M['EQModel']] + ' (' + r[T['Warranty Item']] + ')';
 }
 
+// Every file goes in the one folder beside this sheet, whoever makes it.
+// Someone who doesn't own the sheet can't see where it lives, so look for the
+// owner's folder shared with them. Failing that the file stays in their own
+// Drive, shared with the sheet's owner, so it can always be found.
 function moveToFolder_(fileId, folderName) {
   const file = DriveApp.getFileById(fileId);
-  const parents = DriveApp.getFileById(SpreadsheetApp.getActive().getId()).getParents();
+  const book = DriveApp.getFileById(SpreadsheetApp.getActive().getId());
+  const bookOwner = book.getOwner();
+  const owner = bookOwner ? bookOwner.getEmail() : '';
+  const named = DriveApp.getFoldersByName(folderName);
+  while (owner && named.hasNext()) {
+    const folder = named.next();
+    const who = folder.getOwner();
+    if (folder.isTrashed() || !who || who.getEmail() !== owner) continue;
+    try { file.moveTo(folder); return; } catch (err) { console.error('Could not use ' + folderName + ': ' + err); }
+  }
+  const parents = book.getParents();
   const home = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
   const found = home.getFoldersByName(folderName);
   file.moveTo(found.hasNext() ? found.next() : home.createFolder(folderName));
+  const maker = file.getOwner();
+  if (owner && maker && maker.getEmail() !== owner) {
+    try { file.addEditor(owner); } catch (err) { console.error('Could not share the file: ' + err); }
+  }
 }
 
 // ── Reminders ──────────────────────────────────────────────────────────────
@@ -1474,6 +1598,15 @@ function ensureSetup_() {
     sh.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied('=AND($A2<>"",$B2="")').setBackground('#fce5cd')
       .setRanges([sh.getRange('B2:C')]).build()]);
+  }
+  if (!ss.getSheetByName(SCANS_TAB)) {
+    const sh = ss.insertSheet(SCANS_TAB);
+    sh.getRange(1, 1, 1, SCAN_HEADERS.length).setValues([SCAN_HEADERS]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(SC['Kit'] + 1, 340);
+    sh.setColumnWidth(SC['Lens'] + 1, 220);
+    sh.getRange(1, 1).setNote('Lens serials scanned in the register\'s kit popup. The Mack panel fills them in on any ' +
+      'computer for 30 days. Used By = the registration that used it. A wrong serial can be fixed here before it is used.');
   }
   if (!ss.getSheetByName(STAFF_TAB)) {
     const sh = ss.insertSheet(STAFF_TAB);

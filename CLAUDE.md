@@ -123,6 +123,14 @@ no re-approval prompt on the store computers) and never holds Lightspeed keys.
   value above the plan limit, price/coverage different from Lightspeed,
   >30 days. Asks whether the batch was already sent to Mack. Re-importing
   skips rows by Registration ID `FoF-<Row Id>`. Never commit real exports.
+- **Lens Scans tab (sheet script v9, Nov 25 2026).** The register's kit
+  popup (extension 0.16.1) POSTs `action: lens` (STAFF_KEY) and the sheet
+  writes one row per lens (shared Scan ID). `sale`/`gear` answers carry
+  `lens_scans` (unused, last 30 days); the panel fills a kit's lens only
+  from a scan tagged with that receipt or made the day the gear or warranty
+  was sold, and `register` marks the used Scan IDs (Used By = Registration
+  ID). Before this, scans lived only in Chrome sync and two Reno kits lost
+  their lens serials (Nov 24).
 - Tests: `python tests/test_mack.py` (needs requirements installed) and
   `jsc docs/mack-bridge.gs tests/test_mack_bridge.js`.
 
